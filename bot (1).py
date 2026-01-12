@@ -1,0 +1,3719 @@
+import os
+import sqlite3
+import json
+import random
+import asyncio
+import logging
+import io
+import csv
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Any
+from enum import Enum
+
+import telegram
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
+from telegram.constants import ParseMode, ChatAction
+import google.generativeai as genai
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+# ========== CONFIGURATION ==========
+TOKEN = "7660399722:AAHP8WgdS6qkUyJZpOzI82SSwiyguLPKQjc"
+GEMINI_API_KEY = "AIzaSyAHJASpFanIZ1FHD7D-zzpUrIzcbEv5qr8"
+BOT_OWNER_ID = 5536920122 # Replace with your Telegram ID
+ADMIN_IDS = []  # Add additional admin IDs here
+DATABASE_FILE = "shizuka_world.db"
+
+# Bot settings (owner can change these)
+BOT_SETTINGS = {
+    "show_protection_time": True,
+    "kill_success_rate": 50,
+    "rob_success_rate": 40,
+    "kill_fail_cooldown": 30,
+    "kill_cost": 500,
+    "revive_cost": 1000,
+    "rob_cooldown": 60,
+    "protection_prices": {1: 200, 2: 400, 3: 600},
+    "daily_bonus_base": 100,
+    "work_min": 100,
+    "work_max": 500,
+    "tax_rate": 10,
+    "default_currency": "$",
+    "bot_name": "@ImShizukaBot",
+    "wordgame_min_players": 2,
+    "wordgame_max_players": 10,
+    "bombgame_min_players": 2,
+    "bombgame_max_players": 10,
+    "leave_penalty": 10,
+    "max_items_per_page": 10,
+    "min_deposit": 10,
+    "min_withdraw": 10,
+    "bank_interest": 0.1,
+    "lottery_ticket_price": 100,
+    "lottery_prize_base": 1000,
+    "max_bank_percentage": 70,
+    "max_games_per_group": 12,
+    "game_wait_time": 180,
+    "bank_deposit_fee": 1,
+    "bank_withdraw_fee": 2,
+    "couple_show_duration": 24,
+    "pin_duration": 24,
+    "reaction_good": "❤️",
+    "reaction_bad": "👎",
+    "reaction_chance": 30,
+    "max_players_custom": 20
+}
+
+# Default items shop
+DEFAULT_ITEMS = [
+    {"name": "Chocolate 🍫", "price": 1000, "emoji": "🍫", "description": "Sweet chocolate for your loved one"},
+    {"name": "Rose 🌹", "price": 500, "emoji": "🌹", "description": "Beautiful red rose"},
+    {"name": "Diamond 💎", "price": 10000, "emoji": "💎", "description": "Precious diamond"},
+    {"name": "Cake 🎂", "price": 2000, "emoji": "🎂", "description": "Delicious birthday cake"},
+    {"name": "Teddy Bear 🧸", "price": 1500, "emoji": "🧸", "description": "Cuddly teddy bear"},
+    {"name": "Love Letter 💌", "price": 300, "emoji": "💌", "description": "Romantic love letter"},
+    {"name": "Ring 💍", "price": 5000, "emoji": "💍", "description": "Promise ring"},
+    {"name": "Bouquet 💐", "price": 1200, "emoji": "💐", "description": "Beautiful flower bouquet"},
+    {"name": "Golden Crown 👑", "price": 50000, "emoji": "👑", "description": "Royal golden crown"},
+    {"name": "Mystery Box 🎁", "price": 3000, "emoji": "🎁", "description": "Mystery gift box"}
+]
+
+# Initialize Gemini
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-pro')
+except:
+    gemini_model = None
+
+# ========== DATABASE MANAGER ==========
+class DatabaseManager:
+    def __init__(self, db_file: str = DATABASE_FILE):
+        self.db_file = db_file
+        self.init_database()
+    
+    def get_connection(self):
+        conn = sqlite3.connect(self.db_file, check_same_thread=False)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+    
+    def init_database(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Users table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                cash INTEGER DEFAULT 1000,
+                bank INTEGER DEFAULT 0,
+                daily_streak INTEGER DEFAULT 0,
+                last_daily TEXT,
+                last_kill_time TEXT,
+                last_rob_time TEXT,
+                kill_cooldown_until TEXT,
+                jail_until TEXT,
+                revive_until TEXT,
+                kills INTEGER DEFAULT 0,
+                deaths INTEGER DEFAULT 0,
+                rob_success INTEGER DEFAULT 0,
+                rob_failed INTEGER DEFAULT 0,
+                rob_earned INTEGER DEFAULT 0,
+                protection_until TEXT,
+                bio TEXT DEFAULT "🌟 A mysterious soul in Shizuka's world!",
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_active TEXT DEFAULT CURRENT_TIMESTAMP,
+                total_earned INTEGER DEFAULT 0,
+                total_spent INTEGER DEFAULT 0,
+                look_rating INTEGER DEFAULT 0,
+                brain_rating INTEGER DEFAULT 0,
+                items TEXT DEFAULT '{}',
+                banned INTEGER DEFAULT 0,
+                last_deposit TEXT,
+                last_withdraw TEXT
+            )
+            ''')
+            
+            # User name history
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_history (
+                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                old_username TEXT,
+                old_first_name TEXT,
+                change_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            ''')
+            
+            # Games table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS games (
+                game_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER,
+                game_type TEXT,
+                entry_fee INTEGER,
+                players TEXT DEFAULT '[]',
+                status TEXT DEFAULT 'waiting',
+                started_by INTEGER,
+                start_time TEXT,
+                current_players INTEGER DEFAULT 1,
+                max_players INTEGER DEFAULT 10,
+                pot INTEGER DEFAULT 0,
+                winner_id INTEGER,
+                last_activity TEXT DEFAULT CURRENT_TIMESTAMP,
+                auto_end_time TEXT,
+                FOREIGN KEY (group_id) REFERENCES groups(group_id) ON DELETE CASCADE,
+                FOREIGN KEY (started_by) REFERENCES users(user_id) ON DELETE SET NULL,
+                FOREIGN KEY (winner_id) REFERENCES users(user_id) ON DELETE SET NULL
+            )
+            ''')
+            
+            # Items shop
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS items (
+                item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                price INTEGER,
+                emoji TEXT,
+                description TEXT,
+                added_by INTEGER,
+                added_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                available INTEGER DEFAULT 1,
+                FOREIGN KEY (added_by) REFERENCES users(user_id) ON DELETE SET NULL
+            )
+            ''')
+            
+            # Groups table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS groups (
+                group_id INTEGER PRIMARY KEY,
+                title TEXT,
+                welcome_msg TEXT DEFAULT "🌟 Welcome {name} to our family!",
+                farewell_msg TEXT DEFAULT "👋 {name} has left us...",
+                rules TEXT DEFAULT "✨ Be kind and respectful!",
+                game_enabled INTEGER DEFAULT 1,
+                ai_chat_enabled INTEGER DEFAULT 1,
+                warnings TEXT DEFAULT '{}',
+                muted_users TEXT DEFAULT '{}',
+                banned_users TEXT DEFAULT '[]',
+                pinned_messages TEXT DEFAULT '[]',
+                last_couple_show TEXT
+            )
+            ''')
+            
+            # Bot settings
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            ''')
+            
+            # Transactions
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                tx_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_id INTEGER,
+                to_id INTEGER,
+                amount INTEGER,
+                tx_type TEXT,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                description TEXT,
+                FOREIGN KEY (from_id) REFERENCES users(user_id) ON DELETE SET NULL,
+                FOREIGN KEY (to_id) REFERENCES users(user_id) ON DELETE SET NULL
+            )
+            ''')
+            
+            # Kill log
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS kill_log (
+                kill_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                killer_id INTEGER,
+                victim_id INTEGER,
+                kill_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                method TEXT,
+                success INTEGER DEFAULT 1,
+                amount_lost INTEGER DEFAULT 0,
+                revived INTEGER DEFAULT 0,
+                revive_time TEXT,
+                FOREIGN KEY (killer_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (victim_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            ''')
+            
+            # Rob log
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rob_log (
+                rob_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                robber_id INTEGER,
+                victim_id INTEGER,
+                rob_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                amount INTEGER,
+                success INTEGER,
+                jail_time INTEGER,
+                FOREIGN KEY (robber_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (victim_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            ''')
+            
+            # Lottery tickets
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS lottery_tickets (
+                ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                purchase_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                draw_id INTEGER DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            ''')
+            
+            # Lottery draws
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS lottery_draws (
+                draw_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                draw_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                winner_id INTEGER,
+                prize INTEGER,
+                total_tickets INTEGER,
+                FOREIGN KEY (winner_id) REFERENCES users(user_id) ON DELETE SET NULL
+            )
+            ''')
+            
+            # Couples
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS couples (
+                couple_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER,
+                user1_id INTEGER,
+                user2_id INTEGER,
+                couple_date TEXT,
+                message_id INTEGER,
+                votes INTEGER DEFAULT 0,
+                FOREIGN KEY (group_id) REFERENCES groups(group_id) ON DELETE CASCADE,
+                FOREIGN KEY (user1_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (user2_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            ''')
+            
+            # Protection attempts
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS protection_log (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attacker_id INTEGER,
+                protected_id INTEGER,
+                attempt_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                amount_lost INTEGER,
+                FOREIGN KEY (attacker_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (protected_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            ''')
+            
+            # Bank transactions
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bank_transactions (
+                bank_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount INTEGER,
+                transaction_type TEXT,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                fee INTEGER DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )
+            ''')
+            
+            # Pinned messages
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pinned_messages (
+                pin_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER,
+                message_id INTEGER,
+                pin_time TEXT DEFAULT CURRENT_TIMESTAMP,
+                unpin_time TEXT,
+                pinned_by INTEGER,
+                message_text TEXT,
+                FOREIGN KEY (group_id) REFERENCES groups(group_id) ON DELETE CASCADE,
+                FOREIGN KEY (pinned_by) REFERENCES users(user_id) ON DELETE SET NULL
+            )
+            ''')
+            
+            # Insert default settings
+            for key, value in BOT_SETTINGS.items():
+                cursor.execute(
+                    "INSERT OR IGNORE INTO bot_settings (key, value) VALUES (?, ?)",
+                    (key, str(value))
+                )
+            
+            # Insert default items
+            for item in DEFAULT_ITEMS:
+                cursor.execute('''
+                INSERT OR IGNORE INTO items (name, price, emoji, description, added_by)
+                VALUES (?, ?, ?, ?, ?)
+                ''', (item['name'], item['price'], item['emoji'], item['description'], BOT_OWNER_ID))
+            
+            conn.commit()
+    
+    def get_user(self, user_id: int) -> Dict:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            user = cursor.fetchone()
+            
+            if not user:
+                cursor.execute('''
+                INSERT INTO users (user_id) VALUES (?)
+                ''', (user_id,))
+                conn.commit()
+                cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+                user = cursor.fetchone()
+            
+            columns = [desc[0] for desc in cursor.description]
+            user_dict = dict(zip(columns, user))
+            
+            # Parse items JSON
+            if user_dict['items']:
+                try:
+                    user_dict['items'] = json.loads(user_dict['items'])
+                except:
+                    user_dict['items'] = {}
+            else:
+                user_dict['items'] = {}
+            
+            return user_dict
+    
+    def update_user(self, user_id: int, updates: Dict):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Track name changes
+            user = self.get_user(user_id)
+            if 'username' in updates and updates['username'] != user.get('username'):
+                cursor.execute('''
+                INSERT INTO user_history (user_id, old_username, old_first_name)
+                VALUES (?, ?, ?)
+                ''', (user_id, user.get('username'), user.get('first_name')))
+            
+            if not updates:
+                return
+            
+            set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+            values = list(updates.values()) + [user_id]
+            
+            cursor.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", values)
+            conn.commit()
+    
+    def add_cash(self, user_id: int, amount: int, reason: str = ""):
+        user = self.get_user(user_id)
+        self.update_user(user_id, {
+            'cash': user['cash'] + amount,
+            'total_earned': user['total_earned'] + amount
+        })
+        
+        # Log transaction
+        if reason:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                INSERT INTO transactions (to_id, amount, tx_type, description)
+                VALUES (?, ?, 'earn', ?)
+                ''', (user_id, amount, reason))
+                conn.commit()
+    
+    def deduct_cash(self, user_id: int, amount: int, reason: str = "") -> bool:
+        user = self.get_user(user_id)
+        if user['cash'] >= amount:
+            self.update_user(user_id, {
+                'cash': user['cash'] - amount,
+                'total_spent': user['total_spent'] + amount
+            })
+            
+            # Log transaction
+            if reason:
+                with self.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                    INSERT INTO transactions (from_id, amount, tx_type, description)
+                    VALUES (?, ?, 'spend', ?)
+                    ''', (user_id, amount, reason))
+                    conn.commit()
+            return True
+        return False
+    
+    def transfer_cash(self, from_id: int, to_id: int, amount: int, description: str = "") -> bool:
+        if self.deduct_cash(from_id, amount, f"Transfer to {to_id}"):
+            self.add_cash(to_id, amount, f"Received from {from_id}")
+            
+            # Log transaction
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                INSERT INTO transactions (from_id, to_id, amount, tx_type, description)
+                VALUES (?, ?, ?, 'transfer', ?)
+                ''', (from_id, to_id, amount, description))
+                conn.commit()
+            return True
+        return False
+    
+    def get_user_by_username(self, username: str) -> Optional[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,))
+            user = cursor.fetchone()
+            
+            if user:
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, user))
+            return None
+    
+    def get_bot_setting(self, key: str, default=None):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
+            result = cursor.fetchone()
+            
+            if result:
+                value = result[0]
+                try:
+                    return int(value)
+                except:
+                    try:
+                        return float(value)
+                    except:
+                        if value.lower() in ['true', 'false']:
+                            return value.lower() == 'true'
+                        elif value.startswith('{') and value.endswith('}'):
+                            try:
+                                return json.loads(value)
+                            except:
+                                return value
+                        return value
+            return default
+    
+    def set_bot_setting(self, key: str, value):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value)
+            cursor.execute(
+                "INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)",
+                (key, str(value))
+            )
+            conn.commit()
+        BOT_SETTINGS[key] = value
+    
+    def get_group(self, group_id: int) -> Dict:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM groups WHERE group_id = ?", (group_id,))
+            group = cursor.fetchone()
+            
+            if not group:
+                cursor.execute('''
+                INSERT INTO groups (group_id) VALUES (?)
+                ''', (group_id,))
+                conn.commit()
+                cursor.execute("SELECT * FROM groups WHERE group_id = ?", (group_id,))
+                group = cursor.fetchone()
+            
+            columns = [desc[0] for desc in cursor.description]
+            group_dict = dict(zip(columns, group))
+            
+            # Parse JSON fields
+            for field in ['warnings', 'muted_users', 'banned_users', 'pinned_messages']:
+                if group_dict[field]:
+                    try:
+                        group_dict[field] = json.loads(group_dict[field])
+                    except:
+                        group_dict[field] = {} if field in ['warnings', 'muted_users'] else []
+                else:
+                    group_dict[field] = {} if field in ['warnings', 'muted_users'] else []
+            
+            return group_dict
+    
+    def update_group(self, group_id: int, updates: Dict):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            if not updates:
+                return
+            
+            set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+            values = list(updates.values()) + [group_id]
+            
+            cursor.execute(f"UPDATE groups SET {set_clause} WHERE group_id = ?", values)
+            conn.commit()
+    
+    def create_game(self, group_id: int, game_type: str, entry_fee: int, started_by: int, max_players: int = 10) -> int:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            auto_end_time = (datetime.now() + timedelta(seconds=self.get_bot_setting('game_wait_time', 180))).isoformat()
+            cursor.execute('''
+            INSERT INTO games (group_id, game_type, entry_fee, players, started_by, start_time, current_players, max_players, pot, auto_end_time)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            ''', (group_id, game_type, entry_fee, '[]', started_by, datetime.now().isoformat(), max_players, entry_fee, auto_end_time))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_game(self, game_id: int) -> Optional[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM games WHERE game_id = ?", (game_id,))
+            game = cursor.fetchone()
+            
+            if game:
+                columns = [desc[0] for desc in cursor.description]
+                game_dict = dict(zip(columns, game))
+                
+                # Parse players
+                if game_dict['players']:
+                    try:
+                        game_dict['players'] = json.loads(game_dict['players'])
+                    except:
+                        game_dict['players'] = []
+                else:
+                    game_dict['players'] = []
+                
+                return game_dict
+            return None
+    
+    def update_game(self, game_id: int, updates: Dict):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            if not updates:
+                return
+            
+            set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+            values = list(updates.values()) + [game_id]
+            
+            cursor.execute(f"UPDATE games SET {set_clause} WHERE game_id = ?", values)
+            conn.commit()
+    
+    def join_game(self, game_id: int, user_id: int, entry_fee: int) -> bool:
+        game = self.get_game(game_id)
+        if not game:
+            return False
+        
+        if game['status'] != 'waiting':
+            return False
+        
+        if user_id in game['players'] or user_id == game['started_by']:
+            return False
+        
+        if len(game['players']) >= game['max_players'] - 1:
+            return False
+        
+        user = self.get_user(user_id)
+        if user['cash'] < entry_fee:
+            return False
+        
+        if not self.deduct_cash(user_id, entry_fee, f"Join {game['game_type']} game #{game_id}"):
+            return False
+        
+        players = game['players']
+        players.append(user_id)
+        
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            UPDATE games 
+            SET players = ?, current_players = current_players + 1, pot = pot + ?, last_activity = ?
+            WHERE game_id = ?
+            ''', (json.dumps(players), entry_fee, datetime.now().isoformat(), game_id))
+            conn.commit()
+        return True
+    
+    def leave_game(self, game_id: int, user_id: int) -> bool:
+        game = self.get_game(game_id)
+        if not game or game['status'] != 'waiting':
+            return False
+        
+        if user_id == game['started_by']:
+            return False  # Starter cannot leave
+        
+        if user_id not in game['players']:
+            return False
+        
+        # Penalty for leaving
+        penalty = self.get_bot_setting('leave_penalty', 10)
+        if not self.deduct_cash(user_id, penalty, "Leave game penalty"):
+            return False
+        
+        players = game['players']
+        players.remove(user_id)
+        
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            UPDATE games 
+            SET players = ?, current_players = current_players - 1, pot = pot - ?, last_activity = ?
+            WHERE game_id = ?
+            ''', (json.dumps(players), game['entry_fee'], datetime.now().isoformat(), game_id))
+            conn.commit()
+        return True
+    
+    def get_active_games_in_group(self, group_id: int) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT * FROM games 
+            WHERE group_id = ? AND status IN ('waiting', 'active')
+            ORDER BY game_id DESC
+            ''', (group_id,))
+            games = cursor.fetchall()
+            
+            if not games:
+                return []
+            
+            columns = [desc[0] for desc in cursor.description]
+            result = []
+            for game in games:
+                game_dict = dict(zip(columns, game))
+                if game_dict['players']:
+                    try:
+                        game_dict['players'] = json.loads(game_dict['players'])
+                    except:
+                        game_dict['players'] = []
+                else:
+                    game_dict['players'] = []
+                result.append(game_dict)
+            
+            return result
+    
+    def get_user_history(self, user_id: int) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT * FROM user_history 
+            WHERE user_id = ? 
+            ORDER BY change_time DESC
+            ''', (user_id,))
+            history = cursor.fetchall()
+            
+            columns = [desc[0] for desc in cursor.description]
+            return [dict(zip(columns, row)) for row in history]
+    
+    def add_item(self, name: str, price: int, emoji: str, description: str, added_by: int) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('''
+                INSERT INTO items (name, price, emoji, description, added_by)
+                VALUES (?, ?, ?, ?, ?)
+                ''', (name, price, emoji, description, added_by))
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+    
+    def get_items(self, page: int = 1) -> Tuple[List[Dict], int]:
+        limit = self.get_bot_setting('max_items_per_page', 10)
+        offset = (page - 1) * limit
+        
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT * FROM items 
+            WHERE available = 1 
+            ORDER BY price ASC 
+            LIMIT ? OFFSET ?
+            ''', (limit, offset))
+            items = cursor.fetchall()
+            
+            cursor.execute("SELECT COUNT(*) FROM items WHERE available = 1")
+            total = cursor.fetchone()[0]
+            
+            columns = [desc[0] for desc in cursor.description]
+            items_list = [dict(zip(columns, row)) for row in items]
+            total_pages = (total + limit - 1) // limit
+            
+            return items_list, total_pages
+    
+    def get_item_by_id(self, item_id: int) -> Optional[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM items WHERE item_id = ? AND available = 1", (item_id,))
+            item = cursor.fetchone()
+            
+            if item:
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, item))
+            return None
+    
+    def delete_item(self, item_id: int) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("DELETE FROM items WHERE item_id = ?", (item_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+            except:
+                return False
+    
+    def buy_item(self, user_id: int, item_id: int) -> bool:
+        item = self.get_item_by_id(item_id)
+        if not item:
+            return False
+        
+        user = self.get_user(user_id)
+        if user['cash'] < item['price']:
+            return False
+        
+        if not self.deduct_cash(user_id, item['price'], f"Buy {item['name']}"):
+            return False
+        
+        user_items = user['items']
+        item_name = item['name']
+        user_items[item_name] = user_items.get(item_name, 0) + 1
+        
+        self.update_user(user_id, {'items': json.dumps(user_items)})
+        return True
+    
+    def gift_item(self, from_id: int, to_id: int, item_name: str) -> bool:
+        from_user = self.get_user(from_id)
+        to_user = self.get_user(to_id)
+        
+        if item_name not in from_user['items'] or from_user['items'][item_name] < 1:
+            return False
+        
+        # Remove from sender
+        from_items = from_user['items']
+        from_items[item_name] -= 1
+        if from_items[item_name] <= 0:
+            del from_items[item_name]
+        
+        self.update_user(from_id, {'items': json.dumps(from_items)})
+        
+        # Add to receiver
+        to_items = to_user['items']
+        to_items[item_name] = to_items.get(item_name, 0) + 1
+        self.update_user(to_id, {'items': json.dumps(to_items)})
+        
+        return True
+    
+    def get_top_users_by_wealth(self, limit: int = 10) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT user_id, username, first_name, cash + bank as total_wealth, cash, bank
+            FROM users 
+            WHERE cash + bank > 0 AND banned = 0
+            ORDER BY total_wealth DESC 
+            LIMIT ?
+            ''', (limit,))
+            
+            users = []
+            for row in cursor.fetchall():
+                users.append({
+                    'user_id': row[0],
+                    'username': row[1],
+                    'first_name': row[2],
+                    'total_wealth': row[3],
+                    'cash': row[4],
+                    'bank': row[5]
+                })
+            return users
+    
+    def get_top_killers(self, limit: int = 10) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT user_id, username, first_name, kills
+            FROM users 
+            WHERE kills > 0 AND banned = 0
+            ORDER BY kills DESC 
+            LIMIT ?
+            ''', (limit,))
+            
+            killers = []
+            for row in cursor.fetchall():
+                killers.append({
+                    'user_id': row[0],
+                    'username': row[1],
+                    'first_name': row[2],
+                    'kills': row[3]
+                })
+            return killers
+    
+    def get_top_robbers(self, limit: int = 10) -> List[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT user_id, username, first_name, rob_success, rob_earned
+            FROM users 
+            WHERE rob_success > 0 AND banned = 0
+            ORDER BY rob_success DESC 
+            LIMIT ?
+            ''', (limit,))
+            
+            robbers = []
+            for row in cursor.fetchall():
+                robbers.append({
+                    'user_id': row[0],
+                    'username': row[1],
+                    'first_name': row[2],
+                    'rob_success': row[3],
+                    'rob_earned': row[4]
+                })
+            return robbers
+    
+    def get_user_rank_by_wealth(self, user_id: int) -> int:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT COUNT(*) + 1 as rank
+            FROM users u1
+            WHERE (SELECT cash + bank FROM users u2 WHERE u2.user_id = u1.user_id) > 
+                  (SELECT cash + bank FROM users u3 WHERE u3.user_id = ?)
+            ''', (user_id,))
+            
+            result = cursor.fetchone()
+            return result[0] if result else 1
+    
+    def deposit_to_bank(self, user_id: int, amount: int) -> bool:
+        user = self.get_user(user_id)
+        
+        # Check max bank percentage
+        max_percentage = self.get_bot_setting('max_bank_percentage', 70) / 100
+        total_wealth = user['cash'] + user['bank']
+        max_bank = int(total_wealth * max_percentage)
+        
+        if user['bank'] + amount > max_bank:
+            return False
+        
+        if not self.deduct_cash(user_id, amount, f"Bank deposit"):
+            return False
+        
+        # Apply deposit fee
+        fee_percentage = self.get_bot_setting('bank_deposit_fee', 1) / 100
+        fee = int(amount * fee_percentage)
+        deposit_amount = amount - fee
+        
+        self.update_user(user_id, {
+            'bank': user['bank'] + deposit_amount,
+            'last_deposit': datetime.now().isoformat()
+        })
+        
+        # Log bank transaction
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            INSERT INTO bank_transactions (user_id, amount, transaction_type, fee)
+            VALUES (?, ?, 'deposit', ?)
+            ''', (user_id, deposit_amount, fee))
+            conn.commit()
+        
+        return True
+    
+    def withdraw_from_bank(self, user_id: int, amount: int) -> bool:
+        user = self.get_user(user_id)
+        
+        if user['bank'] < amount:
+            return False
+        
+        # Apply withdraw fee
+        fee_percentage = self.get_bot_setting('bank_withdraw_fee', 2) / 100
+        fee = int(amount * fee_percentage)
+        withdraw_amount = amount - fee
+        
+        self.update_user(user_id, {
+            'bank': user['bank'] - amount,
+            'cash': user['cash'] + withdraw_amount,
+            'last_withdraw': datetime.now().isoformat()
+        })
+        
+        # Log bank transaction
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            INSERT INTO bank_transactions (user_id, amount, transaction_type, fee)
+            VALUES (?, ?, 'withdraw', ?)
+            ''', (user_id, withdraw_amount, fee))
+            conn.commit()
+        
+        return True
+    
+    def add_couple(self, group_id: int, user1_id: int, user2_id: int) -> int:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            INSERT INTO couples (group_id, user1_id, user2_id, couple_date)
+            VALUES (?, ?, ?, ?)
+            ''', (group_id, user1_id, user2_id, datetime.now().date().isoformat()))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_todays_couple(self, group_id: int) -> Optional[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            today = datetime.now().date().isoformat()
+            cursor.execute('''
+            SELECT * FROM couples 
+            WHERE group_id = ? AND couple_date = ?
+            ORDER BY couple_id DESC LIMIT 1
+            ''', (group_id, today))
+            couple = cursor.fetchone()
+            
+            if couple:
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, couple))
+            return None
+    
+    def add_pinned_message(self, group_id: int, message_id: int, pinned_by: int, message_text: str):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            unpin_time = (datetime.now() + timedelta(hours=self.get_bot_setting('pin_duration', 24))).isoformat()
+            cursor.execute('''
+            INSERT INTO pinned_messages (group_id, message_id, pin_time, unpin_time, pinned_by, message_text)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''', (group_id, message_id, datetime.now().isoformat(), unpin_time, pinned_by, message_text))
+            conn.commit()
+            
+            # Update group pinned messages
+            group_data = self.get_group(group_id)
+            pinned_messages = group_data['pinned_messages']
+            pinned_messages.append({
+                'message_id': message_id,
+                'pin_time': datetime.now().isoformat(),
+                'pinned_by': pinned_by,
+                'message_text': message_text[:100]
+            })
+            self.update_group(group_id, {'pinned_messages': json.dumps(pinned_messages)})
+    
+    def remove_old_pins(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            DELETE FROM pinned_messages 
+            WHERE unpin_time < ?
+            ''', (datetime.now().isoformat(),))
+            conn.commit()
+    
+    def export_data(self) -> Dict:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            data = {
+                'export_time': datetime.now().isoformat(),
+                'version': '2.0'
+            }
+            
+            # Export users
+            cursor.execute("SELECT * FROM users")
+            users = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            data['users'] = [dict(zip(columns, row)) for row in users]
+            
+            # Export items
+            cursor.execute("SELECT * FROM items")
+            items = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            data['items'] = [dict(zip(columns, row)) for row in items]
+            
+            # Export settings
+            cursor.execute("SELECT * FROM bot_settings")
+            settings = cursor.fetchall()
+            data['settings'] = dict(settings)
+            
+            # Export groups
+            cursor.execute("SELECT * FROM groups")
+            groups = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            data['groups'] = [dict(zip(columns, row)) for row in groups]
+            
+            return data
+    
+    def import_data(self, data: Dict):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Clear existing data
+            tables = ['users', 'items', 'bot_settings', 'groups', 'user_history', 
+                     'games', 'transactions', 'kill_log', 'rob_log', 
+                     'lottery_tickets', 'lottery_draws', 'couples', 'protection_log',
+                     'bank_transactions', 'pinned_messages']
+            
+            for table in tables:
+                try:
+                    cursor.execute(f"DELETE FROM {table}")
+                except:
+                    pass
+            
+            # Import users
+            for user in data.get('users', []):
+                columns = ', '.join(user.keys())
+                placeholders = ', '.join(['?' for _ in user])
+                values = list(user.values())
+                cursor.execute(f"INSERT INTO users ({columns}) VALUES ({placeholders})", values)
+            
+            # Import items
+            for item in data.get('items', []):
+                columns = ', '.join(item.keys())
+                placeholders = ', '.join(['?' for _ in item])
+                values = list(item.values())
+                cursor.execute(f"INSERT INTO items ({columns}) VALUES ({placeholders})", values)
+            
+            # Import settings
+            for key, value in data.get('settings', {}).items():
+                cursor.execute("INSERT INTO bot_settings (key, value) VALUES (?, ?)", (key, value))
+            
+            # Import groups
+            for group in data.get('groups', []):
+                columns = ', '.join(group.keys())
+                placeholders = ', '.join(['?' for _ in group])
+                values = list(group.values())
+                cursor.execute(f"INSERT INTO groups ({columns}) VALUES ({placeholders})", values)
+            
+            conn.commit()
+
+# Initialize database
+db = DatabaseManager()
+
+# ========== HELPER FUNCTIONS ==========
+def format_money(amount: int) -> str:
+    currency = db.get_bot_setting('default_currency', '$')
+    
+    if amount >= 1000000:
+        return f"🏦 {currency}{amount/1000000:.1f}M"
+    elif amount >= 10000:
+        return f"💰 {currency}{amount/1000:.1f}K"
+    else:
+        return f"💵 {currency}{amount}"
+
+async def get_user_from_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[Dict]:
+    """Get user from reply, mention, or user ID"""
+    try:
+        # Check if replying to a message
+        if update.message.reply_to_message:
+            return {
+                'id': update.message.reply_to_message.from_user.id,
+                'name': update.message.reply_to_message.from_user.first_name,
+                'username': update.message.reply_to_message.from_user.username
+            }
+        
+        # Check if username/ID provided in arguments
+        if context.args:
+            target = context.args[0]
+            
+            # Check if it's a mention
+            if target.startswith('@'):
+                username = target[1:]
+                user = db.get_user_by_username(username)
+                if user:
+                    return {
+                        'id': user['user_id'],
+                        'name': user['first_name'],
+                        'username': user['username']
+                    }
+            
+            # Check if it's a user ID
+            try:
+                user_id = int(target)
+                user_data = db.get_user(user_id)
+                if user_data:
+                    return {
+                        'id': user_id,
+                        'name': user_data.get('first_name', f'User {user_id}'),
+                        'username': user_data.get('username')
+                    }
+            except ValueError:
+                pass
+        
+        return None
+    except Exception as e:
+        logging.error(f"Error getting user from input: {e}")
+        return None
+
+async def get_user_info(context, user_id: int) -> Dict:
+    try:
+        user = await context.bot.get_chat(user_id)
+        return {
+            'id': user.id,
+            'name': user.first_name,
+            'username': f"@{user.username}" if user.username else "No Username",
+            'mention': f"[{user.first_name}](tg://user?id={user.id})"
+        }
+    except Exception as e:
+        logging.error(f"Error getting user info: {e}")
+        user_data = db.get_user(user_id)
+        return {
+            'id': user_id,
+            'name': user_data.get('first_name', f"User {user_id}"),
+            'username': "No Username",
+            'mention': f"User {user_id}"
+        }
+
+def create_inline_keyboard(buttons: List[List[Dict]]) -> InlineKeyboardMarkup:
+    keyboard = []
+    for row in buttons:
+        keyboard_row = []
+        for btn in row:
+            keyboard_row.append(InlineKeyboardButton(
+                text=btn['text'],
+                callback_data=btn['callback']
+            ))
+        keyboard.append(keyboard_row)
+    return InlineKeyboardMarkup(keyboard)
+
+def is_owner(user_id: int) -> bool:
+    return user_id == BOT_OWNER_ID or user_id in ADMIN_IDS
+
+async def is_group_admin(bot, chat_id: int, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ['administrator', 'creator']
+    except Exception as e:
+        logging.error(f"Error checking admin status: {e}")
+        return False
+
+def get_fancy_text(text: str) -> str:
+    fancy_chars = {
+        'a': '𝒶', 'b': '𝒷', 'c': '𝒸', 'd': '𝒹', 'e': '𝑒', 'f': '𝒻', 'g': '𝑔',
+        'h': '𝒽', 'i': '𝒾', 'j': '𝒿', 'k': '𝓀', 'l': '𝓁', 'm': '𝓂', 'n': '𝓃',
+        'o': '𝑜', 'p': '𝓅', 'q': '𝓆', 'r': '𝓇', 's': '𝓈', 't': '𝓉', 'u': '𝓊',
+        'v': '𝓋', 'w': '𝓌', 'x': '𝓍', 'y': '𝓎', 'z': '𝓏',
+        'A': '𝒜', 'B': 'ℬ', 'C': '𝒞', 'D': '𝒟', 'E': 'ℰ', 'F': 'ℱ', 'G': '𝒢',
+        'H': 'ℋ', 'I': 'ℐ', 'J': '𝒥', 'K': '𝒦', 'L': 'ℒ', 'M': 'ℳ', 'N': '𝒩',
+        'O': '𝒪', 'P': '𝒫', 'Q': '𝒬', 'R': 'ℛ', 'S': '𝒮', 'T': '𝒯', 'U': '𝒰',
+        'V': '𝒱', 'W': '𝒲', 'X': '𝒳', 'Y': '𝒴', 'Z': '𝒵'
+    }
+    
+    result = ''
+    for char in text:
+        result += fancy_chars.get(char, char)
+    return result
+
+async def check_game_limit(group_id: int) -> bool:
+    """Check if group has reached game limit"""
+    active_games = db.get_active_games_in_group(group_id)
+    max_games = db.get_bot_setting('max_games_per_group', 12)
+    return len(active_games) < max_games
+
+# ========== GAME MANAGEMENT ==========
+class GameManager:
+    @staticmethod
+    async def start_bomb_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start bomb game with entry fee"""
+        try:
+            if update.effective_chat.type == "private":
+                await update.message.reply_text(
+                    "💣 *𝒯𝒽𝒾𝓈 𝑔𝒶𝓂𝑒 𝓃𝑒𝑒𝒹𝓈 𝒶 𝑔𝓇𝑜𝓊𝓅!* 💣\n\n"
+                    "𝒥𝑜𝒾𝓃 𝒶 𝑔𝓇𝑜𝓊𝓅 𝓉𝑜 𝓅𝓁𝒶𝓎 𝓌𝒾𝓉𝒽 𝒻𝓇𝒾𝑒𝓃𝒹𝓈! 👥",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            # Check game limit
+            if not await check_game_limit(update.effective_chat.id):
+                await update.message.reply_text(
+                    f"🚫 *𝑀𝒶𝓍𝒾𝓂𝓊𝓂 𝑔𝒶𝓂𝑒𝓈 𝓇𝑒𝒶𝒸𝒽𝑒𝒹!* 🚫\n\n"
+                    f"𝒪𝓃𝓁𝓎 {db.get_bot_setting('max_games_per_group', 12)} 𝒶𝒸𝓉𝒾𝓋𝑒 𝑔𝒶𝓂𝑒𝓈 𝒶𝓁𝓁𝑜𝓌𝑒𝒹 𝓅𝑒𝓇 𝑔𝓇𝑜𝓊𝓅.\n"
+                    f"𝒲𝒶𝒾𝓉 𝒻𝑜𝓇 𝒸𝓊𝓇𝓇𝑒𝓃𝓉 𝑔𝒶𝓂𝑒𝓈 𝓉𝑜 𝑒𝓃𝒹.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            if not context.args:
+                await update.message.reply_text(
+                    "💣 *𝒰𝓈𝒶𝑔𝑒:* /bomb 𝒶𝓂𝑜𝓊𝓃𝓉 [𝓂𝒶𝓍_𝓅𝓁𝒶𝓎𝑒𝓇𝓈]\n"
+                    "💰 *𝑀𝒾𝓃:* 10 | *𝑀𝒶𝓍:* 1000\n"
+                    "👥 *𝒟𝑒𝒻𝒶𝓊𝓁𝓉 𝓂𝒶𝓍 𝓅𝓁𝒶𝓎𝑒𝓇𝓈:* 10\n"
+                    "👑 *𝑀𝒶𝓍 𝒸𝓊𝓈𝓉𝑜𝓂:* 20\n\n"
+                    "*𝐸𝓍𝒶𝓂𝓅𝓁𝑒:* /bomb 100 8",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            try:
+                entry_fee = int(context.args[0])
+                if entry_fee < 10 or entry_fee > 1000:
+                    await update.message.reply_text(
+                        "💰 *𝒜𝓂𝑜𝓊𝓃𝓉 𝓂𝓊𝓈𝓉 𝒷𝑒 𝒷𝑒𝓉𝓌𝑒𝑒𝓃 10 𝒶𝓃𝒹 1000!* 💰"
+                    )
+                    return
+                
+                max_players = 10  # Default
+                if len(context.args) > 1:
+                    max_players = int(context.args[1])
+                    max_custom = db.get_bot_setting('max_players_custom', 20)
+                    if max_players < 2 or max_players > max_custom:
+                        await update.message.reply_text(
+                            f"👥 *𝑀𝒶𝓍 𝓅𝓁𝒶𝓎𝑒𝓇𝓈 𝓂𝓊𝓈𝓉 𝒷𝑒 𝒷𝑒𝓉𝓌𝑒𝑒𝓃 2 𝒶𝓃𝒹 {max_custom}!* 👥"
+                        )
+                        return
+            except ValueError:
+                await update.message.reply_text("❌ *𝒫𝓁𝑒𝒶𝓈𝑒 𝑒𝓃𝓉𝑒𝓇 𝓋𝒶𝓁𝒾𝒹 𝓃𝓊𝓂𝒷𝑒𝓇𝓈!* ❌")
+                return
+            
+            user = update.effective_user
+            user_data = db.get_user(user.id)
+            
+            if user_data['cash'] < entry_fee:
+                await update.message.reply_text(
+                    f"💸 *𝒩𝑜𝓉 𝑒𝓃𝑜𝓊𝑔𝒽 𝓂𝑜𝓃𝑒𝓎!* 💸\n\n"
+                    f"𝒴𝑜𝓊 𝓃𝑒𝑒𝒹: {format_money(entry_fee)}\n"
+                    f"𝒴𝑜𝓊 𝒽𝒶𝓋𝑒: {format_money(user_data['cash'])}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            game_id = db.create_game(
+                update.effective_chat.id,
+                'bomb',
+                entry_fee,
+                user.id,
+                max_players
+            )
+            
+            db.deduct_cash(user.id, entry_fee, f"Start bomb game #{game_id}")
+            
+            await update.message.reply_text(
+                f"""
+💣 *𝗕𝗢𝗠𝗕 𝗚𝗔𝗠𝗘 𝗖𝗥𝗘𝗔𝗧𝗘𝗗!* 💣
+
+🎮 *𝒢𝒶𝓂𝑒 𝐼𝒟:* #{game_id}
+💰 *𝐸𝓃𝓉𝓇𝓎 𝐹𝑒𝑒:* {format_money(entry_fee)}
+👤 *𝐻𝑜𝓈𝓉:* {user.first_name}
+👥 *𝒫𝓁𝒶𝓎𝑒𝓇𝓈:* 1/{max_players}
+⏰ *𝒜𝓊𝓉𝑜-𝒸𝒶𝓃𝒸𝑒𝓁:* 3 𝓂𝒾𝓃𝓊𝓉𝑒𝓈
+
+⚡ *𝒰𝓈𝑒* `/join {entry_fee}` *𝓉𝑜 𝒿𝑜𝒾𝓃!*
+
+                """,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logging.error(f"Bomb game start error: {e}")
+            await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓈𝓉𝒶𝓇𝓉𝒾𝓃𝑔 𝑔𝒶𝓂𝑒!* ❌")
+    
+    @staticmethod
+    async def start_word_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start word game with entry fee"""
+        try:
+            if update.effective_chat.type == "private":
+                await update.message.reply_text(
+                    "📝 *𝒯𝒽𝒾𝓈 𝑔𝒶𝓂𝑒 𝓃𝑒𝑒𝒹𝓈 𝒶 𝑔𝓇𝑜𝓊𝓅!* 📝\n\n"
+                    "𝒥𝑜𝒾𝓃 𝒶 𝑔𝓇𝑜𝓊𝓅 𝓉𝑜 𝓅𝓁𝒶𝓎 𝓌𝒾𝓉𝒽 𝒻𝓇𝒾𝑒𝓃𝒹𝓈! 👥",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            # Check game limit
+            if not await check_game_limit(update.effective_chat.id):
+                await update.message.reply_text(
+                    f"🚫 *𝑀𝒶𝓍𝒾𝓂𝓊𝓂 𝑔𝒶𝓂𝑒𝓈 𝓇𝑒𝒶𝒸𝒽𝑒𝒹!* 🚫\n\n"
+                    f"𝒪𝓃𝓁𝓎 {db.get_bot_setting('max_games_per_group', 12)} 𝒶𝒸𝓉𝒾𝓋𝑒 𝑔𝒶𝓂𝑒𝓈 𝒶𝓁𝓁𝑜𝓌𝑒𝒹 𝓅𝑒𝓇 𝑔𝓇𝑜𝓊𝓅.\n"
+                    f"𝒲𝒶𝒾𝓉 𝒻𝑜𝓇 𝒸𝓊𝓇𝓇𝑒𝓃𝓉 𝑔𝒶𝓂𝑒𝓈 𝓉𝑜 𝑒𝓃𝒹.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            if not context.args:
+                await update.message.reply_text(
+                    "📝 *𝒰𝓈𝒶𝑔𝑒:* /wordgame 𝒶𝓂𝑜𝓊𝓃𝓉 [𝓂𝒶𝓍_𝓅𝓁𝒶𝓎𝑒𝓇𝓈]\n"
+                    "💰 *𝑀𝒾𝓃:* 10 | *𝑀𝒶𝓍:* 1000\n"
+                    "👥 *𝒟𝑒𝒻𝒶𝓊𝓁𝓉 𝓂𝒶𝓍 𝓅𝓁𝒶𝓎𝑒𝓇𝓈:* 10\n"
+                    "👑 *𝑀𝒶𝓍 𝒸𝓊𝓈𝓉𝑜𝓂:* 20\n\n"
+                    "*𝐸𝓍𝒶𝓂𝓅𝓁𝑒:* /wordgame 100 6",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            try:
+                entry_fee = int(context.args[0])
+                if entry_fee < 10 or entry_fee > 1000:
+                    await update.message.reply_text(
+                        "💰 *𝒜𝓂𝑜𝓊𝓃𝓉 𝓂𝓊𝓈𝓉 𝒷𝑒 𝒷𝑒𝓉𝓌𝑒𝑒𝓃 10 𝒶𝓃𝒹 1000!* 💰"
+                    )
+                    return
+                
+                max_players = 10  # Default
+                if len(context.args) > 1:
+                    max_players = int(context.args[1])
+                    max_custom = db.get_bot_setting('max_players_custom', 20)
+                    if max_players < 2 or max_players > max_custom:
+                        await update.message.reply_text(
+                            f"👥 *𝑀𝒶𝓍 𝓅𝓁𝒶𝓎𝑒𝓇𝓈 𝓂𝓊𝓈𝓉 𝒷𝑒 𝒷𝑒𝓉𝓌𝑒𝑒𝓃 2 𝒶𝓃𝒹 {max_custom}!* 👥"
+                        )
+                        return
+            except ValueError:
+                await update.message.reply_text("❌ *𝒫𝓁𝑒𝒶𝓈𝑒 𝑒𝓃𝓉𝑒𝓇 𝓋𝒶𝓁𝒾𝒹 𝓃𝓊𝓂𝒷𝑒𝓇𝓈!* ❌")
+                return
+            
+            user = update.effective_user
+            user_data = db.get_user(user.id)
+            
+            if user_data['cash'] < entry_fee:
+                await update.message.reply_text(
+                    f"💸 *𝒩𝑜𝓉 𝑒𝓃𝑜𝓊𝑔𝒽 𝓂𝑜𝓃𝑒𝓎!* 💸\n\n"
+                    f"𝒴𝑜𝓊 𝓃𝑒𝑒𝒹: {format_money(entry_fee)}\n"
+                    f"𝒴𝑜𝓊 𝒽𝒶𝓋𝑒: {format_money(user_data['cash'])}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            game_id = db.create_game(
+                update.effective_chat.id,
+                'word',
+                entry_fee,
+                user.id,
+                max_players
+            )
+            
+            db.deduct_cash(user.id, entry_fee, f"Start word game #{game_id}")
+            
+            await update.message.reply_text(
+                f"""
+📝 *𝗪𝗢𝗥𝗗 𝗚𝗔𝗠𝗘 𝗖𝗥𝗘𝗔𝗧𝗘𝗗!* 📝
+
+🎮 *𝒢𝒶𝓂𝑒 𝐼𝒟:* #{game_id}
+💰 *𝐸𝓃𝓉𝓇𝓎 𝐹𝑒𝑒:* {format_money(entry_fee)}
+👤 *𝐻𝑜𝓈𝓉:* {user.first_name}
+👥 *𝒫𝓁𝒶𝓎𝑒𝓇𝓈:* 1/{max_players}
+⏰ *𝒜𝓊𝓉𝑜-𝒸𝒶𝓃𝒸𝑒𝓁:* 3 𝓂𝒾𝓃𝓊𝓉𝑒𝓈
+
+⚡ *𝒰𝓈𝑒* `/join {entry_fee}` *𝓉𝑜 𝒿𝑜𝒾𝓃!*
+
+                """,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logging.error(f"Word game start error: {e}")
+            await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓈𝓉𝒶𝓇𝓉𝒾𝓃𝑔 𝑔𝒶𝓂𝑒!* ❌")
+    
+    @staticmethod
+    async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Join a game with same entry fee"""
+        try:
+            if update.effective_chat.type == "private":
+                await update.message.reply_text(
+                    "🎮 *𝒥𝑜𝒾𝓃 𝑔𝒶𝓂𝑒𝓈 𝒾𝓃 𝑔𝓇𝑜𝓊𝓅𝓈 𝑜𝓃𝓁𝓎!* 🎮"
+                )
+                return
+            
+            if not context.args:
+                await update.message.reply_text(
+                    "🎮 *𝒰𝓈𝒶𝑔𝑒:* /join 𝒶𝓂𝑜𝓊𝓃𝓉\n"
+                    "💰 *𝒥𝑜𝒾𝓃 𝓌𝒾𝓉𝒽 𝓈𝒶𝓂𝑒 𝑒𝓃𝓉𝓇𝓎 𝒻𝑒𝑒 𝒶𝓈 𝑔𝒶𝓂𝑒*\n\n"
+                    "*𝐸𝓍𝒶𝓂𝓅𝓁𝑒:* /join 100",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            try:
+                entry_fee = int(context.args[0])
+            except ValueError:
+                await update.message.reply_text("❌ *𝒫𝓁𝑒𝒶𝓈𝑒 𝑒𝓃𝓉𝑒𝓇 𝒶 𝓋𝒶𝓁𝒾𝒹 𝓃𝓊𝓂𝒷𝑒𝓇!* ❌")
+                return
+            
+            user = update.effective_user
+            group_id = update.effective_chat.id
+            
+            # Find active game with matching entry fee
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                SELECT * FROM games 
+                WHERE group_id = ? AND entry_fee = ? AND status = 'waiting'
+                ORDER BY game_id DESC LIMIT 1
+                ''', (group_id, entry_fee))
+                game = cursor.fetchone()
+                
+                if not game:
+                    await update.message.reply_text(
+                        f"❌ *𝒩𝑜 𝒶𝒸𝓉𝒾𝓋𝑒 𝑔𝒶𝓂𝑒 𝒻𝑜𝓊𝓃𝒹 𝓌𝒾𝓉𝒽 𝑒𝓃𝓉𝓇𝓎 𝒻𝑒𝑒 {format_money(entry_fee)}!* ❌\n\n"
+                        f"𝒮𝓉𝒶𝓇𝓉 𝒶 𝓃𝑒𝓌 𝑔𝒶𝓂𝑒 𝓌𝒾𝓉𝒽 /bomb {entry_fee} 𝑜𝓇 /wordgame {entry_fee}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return
+                
+                columns = [desc[0] for desc in cursor.description]
+                game_dict = dict(zip(columns, game))
+                
+                # Parse players
+                if game_dict['players']:
+                    try:
+                        game_dict['players'] = json.loads(game_dict['players'])
+                    except:
+                        game_dict['players'] = []
+                else:
+                    game_dict['players'] = []
+                
+                if db.join_game(game_dict['game_id'], user.id, entry_fee):
+                    players = game_dict['players']
+                    players.append(user.id)
+                    current_players = len(players) + 1  # +1 for host
+                    
+                    min_players = db.get_bot_setting(f"{game_dict['game_type']}game_min_players", 2)
+                    
+                    await update.message.reply_text(
+                        f"""
+✅ *𝒥𝑜𝒾𝓃𝑒𝒹 𝒮𝓊𝒸𝒸𝑒𝓈𝓈𝒻𝓊𝓁𝓁𝓎!* ✅
+
+🎮 *𝒢𝒶𝓂𝑒 𝒯𝓎𝓅𝑒:* {game_dict['game_type'].title()} 𝒢𝒶𝓂𝑒
+💰 *𝐸𝓃𝓉𝓇𝓎 𝐹𝑒𝑒:* {format_money(entry_fee)}
+👤 *𝒫𝓁𝒶𝓎𝑒𝓇:* {user.first_name}
+👥 *𝒯𝑜𝓉𝒶𝓁 𝒫𝓁𝒶𝓎𝑒𝓇𝓈:* {current_players}/{game_dict['max_players']}
+⚡ *𝒩𝑒𝑒𝒹:* {max(0, min_players - current_players)} 𝓂𝑜𝓇𝑒 𝓉𝑜 𝓈𝓉𝒶𝓇𝓉
+
+                        """,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    
+                    # Check if we have enough players to start
+                    if current_players >= min_players:
+                        await GameManager.start_game(context, game_dict['game_id'])
+                else:
+                    await update.message.reply_text(
+                        "❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝒿𝑜𝒾𝓃 𝑔𝒶𝓂𝑒!* ❌\n\n"
+                        "𝒞𝒽𝑒𝒸𝓀 𝓎𝑜𝓊𝓇 𝒷𝒶𝓁𝒶𝓃𝒸𝑒 𝑜𝓇 𝒾𝒻 𝑔𝒶𝓂𝑒 𝒾𝓈 𝒻𝓊𝓁𝓁."
+                    )
+        except Exception as e:
+            logging.error(f"Join game error: {e}")
+            await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝒿𝑜𝒾𝓃𝒾𝓃𝑔 𝑔𝒶𝓂𝑒!* ❌")
+    
+    @staticmethod
+    async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Leave current game with penalty"""
+        try:
+            if update.effective_chat.type == "private":
+                await update.message.reply_text("❌ *𝒯𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹 𝓌𝑜𝓇𝓀𝓈 𝒾𝓃 𝑔𝓇𝑜𝓊𝓅𝓈 𝑜𝓃𝓁𝓎!* ❌")
+                return
+            
+            user = update.effective_user
+            group_id = update.effective_chat.id
+            
+            # Find user's active games
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                SELECT * FROM games 
+                WHERE group_id = ? AND status = 'waiting' 
+                AND (started_by = ? OR players LIKE ?)
+                ''', (group_id, user.id, f'%{user.id}%'))
+                games = cursor.fetchall()
+                
+                if not games:
+                    await update.message.reply_text("❌ *𝒩𝑜 𝒶𝒸𝓉𝒾𝓋𝑒 𝑔𝒶𝓂𝑒𝓈 𝓉𝑜 𝓁𝑒𝒶𝓋𝑒!* ❌")
+                    return
+                
+                columns = [desc[0] for desc in cursor.description]
+                game_dict = dict(zip(columns, games[0]))
+                
+                # Parse players
+                if game_dict['players']:
+                    try:
+                        game_dict['players'] = json.loads(game_dict['players'])
+                    except:
+                        game_dict['players'] = []
+                
+                if game_dict['started_by'] == user.id:
+                    await update.message.reply_text("⚠️ *𝒢𝒶𝓂𝑒 𝒽𝑜𝓈𝓉 𝒸𝒶𝓃𝓃𝑜𝓉 𝓁𝑒𝒶𝓋𝑒!* ⚠️\n\n𝒞𝒶𝓃𝒸𝑒𝓁 𝓉𝒽𝑒 𝑔𝒶𝓂𝑒 𝒾𝓃𝓈𝓉𝑒𝒶𝒹.")
+                    return
+                
+                if db.leave_game(game_dict['game_id'], user.id):
+                    penalty = db.get_bot_setting('leave_penalty', 10)
+                    await update.message.reply_text(
+                        f"""
+❌ *𝐿𝑒𝒻𝓉 𝓉𝒽𝑒 𝑔𝒶𝓂𝑒!* ❌
+
+💸 *𝒫𝑒𝓃𝒶𝓁𝓉𝓎 𝓅𝒶𝒾𝒹:* {format_money(penalty)}
+🎮 *𝒢𝒶𝓂𝑒 𝒯𝓎𝓅𝑒:* {game_dict['game_type'].title()} 𝒢𝒶𝓂𝑒
+💰 *𝐸𝓃𝓉𝓇𝓎 𝐹𝑒𝑒:* {format_money(game_dict['entry_fee'])}
+
+                        """,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await update.message.reply_text("❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝓁𝑒𝒶𝓋𝑒 𝑔𝒶𝓂𝑒!* ❌")
+        except Exception as e:
+            logging.error(f"Leave game error: {e}")
+            await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓁𝑒𝒶𝓋𝒾𝓃𝑔 𝑔𝒶𝓂𝑒!* ❌")
+    
+    @staticmethod
+    async def start_game(context: ContextTypes.DEFAULT_TYPE, game_id: int):
+        """Start the game when enough players join"""
+        try:
+            game = db.get_game(game_id)
+            if not game:
+                return
+            
+            # Update game status
+            db.update_game(game_id, {'status': 'active'})
+            
+            players = game['players']
+            players.append(game['started_by'])
+            
+            # Simple game logic (can be expanded)
+            winner_id = random.choice(players)
+            winner = db.get_user(winner_id)
+            
+            # Calculate prize with tax
+            prize = game['pot']
+            tax_rate = db.get_bot_setting('tax_rate', 10) / 100
+            tax = int(prize * tax_rate)
+            net_prize = prize - tax
+            
+            db.add_cash(winner_id, net_prize, f"Win {game['game_type']} game #{game_id}")
+            db.update_game(game_id, {'winner_id': winner_id, 'status': 'completed'})
+            
+            # Notify group
+            try:
+                await context.bot.send_message(
+                    game['group_id'],
+                    f"""
+🎉 *𝒢𝒜𝑀𝐸 𝒞𝒪𝑀𝒫𝐿𝐸𝒯𝐸!* 🎉
+
+🏆 *𝒲𝒾𝓃𝓃𝑒𝓇:* {winner.get('first_name', f'𝒰𝓈𝑒𝓇 {winner_id}')}
+💰 *𝒫𝓇𝒾𝓏𝑒:* {format_money(net_prize)} (𝒶𝒻𝓉𝑒𝓇 {tax_rate*100}% 𝓉𝒶𝓍)
+🎮 *𝒢𝒶𝓂𝑒 𝒯𝓎𝓅𝑒:* {game['game_type'].title()} 𝒢𝒶𝓂𝑒
+👥 *𝒫𝓁𝒶𝓎𝑒𝓇𝓈:* {len(players)}
+
+🎊 *𝒞𝑜𝓃𝑔𝓇𝒶𝓉𝓊𝓁𝒶𝓉𝒾𝑜𝓃𝓈!* 🎊
+                    """,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
+            
+        except Exception as e:
+            logging.error(f"Start game error: {e}")
+    
+    @staticmethod
+    async def check_expired_games():
+        """Check and auto-end games that have been waiting too long"""
+        try:
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                SELECT * FROM games 
+                WHERE status = 'waiting' AND auto_end_time < ?
+                ''', (datetime.now().isoformat(),))
+                games = cursor.fetchall()
+                
+                for game in games:
+                    columns = [desc[0] for desc in cursor.description]
+                    game_dict = dict(zip(columns, game))
+                    
+                    # Return money to host
+                    host_id = game_dict['started_by']
+                    entry_fee = game_dict['entry_fee']
+                    db.add_cash(host_id, entry_fee, f"Game #{game_dict['game_id']} auto-cancelled")
+                    
+                    # Update game status
+                    db.update_game(game_dict['game_id'], {'status': 'cancelled'})
+                    
+                    # Notify in group if possible
+                    try:
+                        await telegram.Bot(TOKEN).send_message(
+                            game_dict['group_id'],
+                            f"""
+⏰ *𝒢𝒶𝓂𝑒 𝒜𝓊𝓉𝑜-𝒸𝒶𝓃𝒸𝑒𝓁𝓁𝑒𝒹!* ⏰
+
+🎮 *𝒢𝒶𝓂𝑒 𝐼𝒟:* #{game_dict['game_id']}
+💸 *𝑅𝑒𝒻𝓊𝓃𝒹𝑒𝒹:* {format_money(entry_fee)} 𝓉𝑜 𝒽𝑜𝓈𝓉
+📝 *𝑅𝑒𝒶𝓈𝑜𝓃:* 𝒩𝑜 𝓅𝓁𝒶𝓎𝑒𝓇𝓈 𝒿𝑜𝒾𝓃𝑒𝒹 𝒾𝓃 3 𝓂𝒾𝓃𝓊𝓉𝑒𝓈
+
+                            """,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    except:
+                        pass
+                        
+        except Exception as e:
+            logging.error(f"Check expired games error: {e}")
+
+# ========== BANKING SYSTEM ==========
+async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deposit money to bank"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "🏦 *𝒰𝓈𝒶𝑔𝑒:* /deposit 𝒶𝓂𝑜𝓊𝓃𝓉\n"
+                f"💰 *𝑀𝒾𝓃𝒾𝓂𝓊𝓂:* {db.get_bot_setting('min_deposit', 10)}\n"
+                f"🏛️ *𝑀𝒶𝓍 𝒷𝒶𝓃𝓀 𝒷𝒶𝓁𝒶𝓃𝒸𝑒:* {db.get_bot_setting('max_bank_percentage', 70)}% 𝓸𝓯 𝓽𝓸𝓽𝓪𝓵 𝔀𝓮𝓪𝓵𝓽𝓱\n"
+                f"💸 *𝒟𝑒𝓅𝑜𝓈𝒾𝓉 𝒻𝑒𝑒:* {db.get_bot_setting('bank_deposit_fee', 1)}%\n\n"
+                "*𝐸𝓍𝒶𝓂𝓅𝓁𝑒:* /deposit 500",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        try:
+            amount = int(context.args[0])
+            min_deposit = db.get_bot_setting('min_deposit', 10)
+            if amount < min_deposit:
+                await update.message.reply_text(
+                    f"❌ *𝑀𝒾𝓃𝒾𝓂𝓊𝓂 𝒹𝑒𝓅𝑜𝓈𝒾𝓉 𝒾𝓈 {format_money(min_deposit)}!* ❌"
+                )
+                return
+        except ValueError:
+            await update.message.reply_text("❌ *𝒫𝓁𝑒𝒶𝓈𝑒 𝑒𝓃𝓉𝑒𝓇 𝒶 𝓋𝒶𝓁𝒾𝒹 𝒶𝓂𝑜𝓊𝓃𝓉!* ❌")
+            return
+        
+        user = update.effective_user
+        user_data = db.get_user(user.id)
+        
+        if user_data['cash'] < amount:
+            await update.message.reply_text(
+                f"💸 *𝒩𝑜𝓉 𝑒𝓃𝑜𝓊𝑔𝒽 𝒸𝒶𝓈𝒽!* 💸\n\n"
+                f"𝒴𝑜𝓊 𝓃𝑒𝑒𝒹: {format_money(amount)}\n"
+                f"𝒴𝑜𝓊 𝒽𝒶𝓋𝑒: {format_money(user_data['cash'])}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        if db.deposit_to_bank(user.id, amount):
+            user_data = db.get_user(user.id)
+            fee_percentage = db.get_bot_setting('bank_deposit_fee', 1)
+            fee = int(amount * fee_percentage / 100)
+            deposit_amount = amount - fee
+            
+            await update.message.reply_text(
+                f"""
+🏦 *𝒟𝑒𝓅𝑜𝓈𝒾𝓉 𝒮𝓊𝒸𝒸𝑒𝓈𝓈𝒻𝓊𝓁!* 🏦
+
+💰 *𝒟𝑒𝓅𝑜𝓈𝒾𝓉𝑒𝒹:* {format_money(deposit_amount)}
+💸 *𝐹𝑒𝑒 ({fee_percentage}%):* {format_money(fee)}
+💵 *𝒩𝑒𝓌 𝒞𝒶𝓈𝒽:* {format_money(user_data['cash'])}
+🏛️ *𝒩𝑒𝓌 𝐵𝒶𝓃𝓀 𝐵𝒶𝓁𝒶𝓃𝒸𝑒:* {format_money(user_data['bank'])}
+
+💡 *𝐵𝒶𝓃𝓀 𝒻𝓊𝓃𝒹𝓈 𝒶𝓇𝑒 𝓈𝒶𝒻𝑒 𝒻𝓇𝑜𝓂 𝓇𝑜𝒷𝒷𝑒𝓇𝓎 𝒶𝓃𝒹 𝓀𝒾𝓁𝓁𝓈!*
+                """,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            # Check if bank limit reached
+            max_percentage = db.get_bot_setting('max_bank_percentage', 70) / 100
+            total_wealth = user_data['cash'] + user_data['bank']
+            max_bank = int(total_wealth * max_percentage)
+            
+            await update.message.reply_text(
+                f"❌ *𝐵𝒶𝓃𝓀 𝓁𝒾𝓂𝒾𝓉 𝓇𝑒𝒶𝒸𝒽𝑒𝒹!* ❌\n\n"
+                f"🏛️ *𝑀𝒶𝓍𝒾𝓂𝓊𝓂 𝒷𝒶𝓃𝓀 𝒷𝒶𝓁𝒶𝓃𝒸𝑒:* {format_money(max_bank)}\n"
+                f"💵 *𝒞𝓊𝓇𝓇𝑒𝓃𝓉 𝒷𝒶𝓃𝓀:* {format_money(user_data['bank'])}\n\n"
+                f"𝒲𝒾𝓉𝒽𝒹𝓇𝒶𝓌 𝓈𝑜𝓂𝑒 𝒻𝓊𝓃𝒹𝓈 𝒻𝒾𝓇𝓈𝓉: /withdraw 𝒶𝓂𝑜𝓊𝓃𝓉",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+    except Exception as e:
+        logging.error(f"Deposit command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝒹𝑒𝓅𝑜𝓈𝒾𝓉𝒾𝓃𝑔 𝓂𝑜𝓃𝑒𝓎!* ❌")
+
+async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Withdraw money from bank"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "🏧 *𝒰𝓈𝒶𝑔𝑒:* /withdraw 𝒶𝓂𝑜𝓊𝓃𝓉\n"
+                f"💰 *𝑀𝒾𝓃𝒾𝓂𝓊𝓂:* {db.get_bot_setting('min_withdraw', 10)}\n"
+                f"💸 *𝒲𝒾𝓉𝒽𝒹𝓇𝒶𝓌 𝒻𝑒𝑒:* {db.get_bot_setting('bank_withdraw_fee', 2)}%\n\n"
+                "*𝐸𝓍𝒶𝓂𝓅𝓁𝑒:* /withdraw 500",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        try:
+            amount = int(context.args[0])
+            min_withdraw = db.get_bot_setting('min_withdraw', 10)
+            if amount < min_withdraw:
+                await update.message.reply_text(
+                    f"❌ *𝑀𝒾𝓃𝒾𝓂𝓊𝓂 𝓌𝒾𝓉𝒽𝒹𝓇𝒶𝓌 𝒾𝓈 {format_money(min_withdraw)}!* ❌"
+                )
+                return
+        except ValueError:
+            await update.message.reply_text("❌ *𝒫𝓁𝑒𝒶𝓈𝑒 𝑒𝓃𝓉𝑒𝓇 𝒶 𝓋𝒶𝓁𝒾𝒹 𝒶𝓂𝑜𝓊𝓃𝓉!* ❌")
+            return
+        
+        user = update.effective_user
+        user_data = db.get_user(user.id)
+        
+        if user_data['bank'] < amount:
+            await update.message.reply_text(
+                f"🏛️ *𝒩𝑜𝓉 𝑒𝓃𝑜𝓊𝑔𝒽 𝒾𝓃 𝒷𝒶𝓃𝓀!* 🏛️\n\n"
+                f"𝒴𝑜𝓊 𝓃𝑒𝑒𝒹: {format_money(amount)}\n"
+                f"𝒴𝑜𝓊 𝒽𝒶𝓋𝑒: {format_money(user_data['bank'])}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        if db.withdraw_from_bank(user.id, amount):
+            user_data = db.get_user(user.id)
+            fee_percentage = db.get_bot_setting('bank_withdraw_fee', 2)
+            fee = int(amount * fee_percentage / 100)
+            withdraw_amount = amount - fee
+            
+            await update.message.reply_text(
+                f"""
+🏧 *𝒲𝒾𝓉𝒽𝒹𝓇𝒶𝓌𝒶𝓁 𝒮𝓊𝒸𝒸𝑒𝓈𝓈𝒻𝓊𝓁!* 🏧
+
+💰 *𝒲𝒾𝓉𝒽𝒹𝓇𝒶𝓌𝓃:* {format_money(withdraw_amount)}
+💸 *𝐹𝑒𝑒 ({fee_percentage}%):* {format_money(fee)}
+💵 *𝒩𝑒𝓌 𝒞𝒶𝓈𝒽:* {format_money(user_data['cash'])}
+🏛️ *𝒩𝑒𝓌 𝐵𝒶𝓃𝓀 𝐵𝒶𝓁𝒶𝓃𝒸𝑒:* {format_money(user_data['bank'])}
+
+💡 *𝒦𝑒𝑒𝓅 𝓎𝑜𝓊𝓇 𝓂𝑜𝓃𝑒𝓎 𝓈𝒶𝒻𝑒 𝒾𝓃 𝓉𝒽𝑒 𝒷𝒶𝓃𝓀!*
+                """,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓌𝒾𝓉𝒽𝒹𝓇𝒶𝓌𝒾𝓃𝑔 𝓂𝑜𝓃𝑒𝓎!* ❌")
+            
+    except Exception as e:
+        logging.error(f"Withdraw command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓌𝒾𝓉𝒽𝒹𝓇𝒶𝓌𝒾𝓃𝑔 𝓂𝑜𝓃𝑒𝓎!* ❌")
+
+# ========== MODERATION COMMANDS (GROUP ADMIN) ==========
+async def kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kick a user from group (admin only)"""
+    try:
+        if update.effective_chat.type == "private":
+            await update.message.reply_text("❌ *𝒯𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹 𝓌𝑜𝓇𝓀𝓈 𝒾𝓃 𝑔𝓇𝑜𝓊𝓅𝓈 𝑜𝓃𝓁𝓎!* ❌")
+            return
+        
+        # Check if user is group admin
+        if not await is_group_admin(context.bot, update.effective_chat.id, update.effective_user.id):
+            await update.message.reply_text(
+                "⛔ *𝒜𝒹𝓂𝒾𝓃 𝒪𝓃𝓁𝓎!*\n\n"
+                "𝒴𝑜𝓊 𝓃𝑒𝑒𝒹 𝓉𝑜 𝒷𝑒 𝒶𝓃 𝒶𝒹𝓂𝒾𝓃 𝓉𝑜 𝓊𝓈𝑒 𝓉𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        target_user = await get_user_from_input(update, context)
+        if not target_user:
+            await update.message.reply_text(
+                "👢 *𝒰𝓈𝒶𝑔𝑒:* /kick @username\n"
+                "👢 *𝒪𝓇 𝓇𝑒𝓅𝓁𝓎 𝓉𝑜 𝓈𝑜𝓂𝑒𝑜𝓃𝑒'𝓈 𝓂𝑒𝓈𝓈𝒶𝑔𝑒 𝓌𝒾𝓉𝒽* /kick",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Check if trying to kick self
+        if target_user['id'] == update.effective_user.id:
+            await update.message.reply_text("🤨 *𝒴𝑜𝓊 𝒸𝒶𝓃'𝓉 𝓀𝒾𝒸𝓀 𝓎𝑜𝓊𝓇𝓈𝑒𝓁𝒻!*")
+            return
+        
+        # Check if trying to kick bot
+        if target_user['id'] == context.bot.id:
+            await update.message.reply_text("🌸 *𝐼 𝒸𝒶𝓃'𝓉 𝓀𝒾𝒸𝓀 𝓂𝓎𝓈𝑒𝓁𝒻!* 𝒯𝒽𝒶𝓉'𝓈 𝓈𝒾𝓁𝓁𝓎! 😊")
+            return
+        
+        try:
+            # Kick the user
+            await context.bot.ban_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=target_user['id'],
+                until_date=int((datetime.now() + timedelta(minutes=1)).timestamp())
+            )
+            
+            # Immediately unban to make it a kick
+            await context.bot.unban_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=target_user['id']
+            )
+            
+            await update.message.reply_text(
+                f"👢 *𝒰𝓈𝑒𝓇 𝒦𝒾𝒸𝓀𝑒𝒹!* 👢\n\n"
+                f"👤 *𝒰𝓈𝑒𝓇:* {target_user['name']}\n"
+                f"👮 *𝐵𝓎:* {update.effective_user.first_name}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logging.error(f"Kick error: {e}")
+            await update.message.reply_text("❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝓀𝒾𝒸𝓀 𝓊𝓈𝑒𝓇!* ❌\n\n𝒞𝒽𝑒𝒸𝓀 𝓂𝓎 𝓅𝑒𝓇𝓂𝒾𝓈𝓈𝒾𝑜𝓃𝓈.")
+            
+    except Exception as e:
+        logging.error(f"Kick command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓀𝒾𝒸𝓀𝒾𝓃𝑔 𝓊𝓈𝑒𝓇!* ❌")
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ban a user from group (admin only)"""
+    try:
+        if update.effective_chat.type == "private":
+            await update.message.reply_text("❌ *𝒯𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹 𝓌𝑜𝓇𝓀𝓈 𝒾𝓃 𝑔𝓇𝑜𝓊𝓅𝓈 𝑜𝓃𝓁𝓎!* ❌")
+            return
+        
+        # Check if user is group admin
+        if not await is_group_admin(context.bot, update.effective_chat.id, update.effective_user.id):
+            await update.message.reply_text(
+                "⛔ *𝒜𝒹𝓂𝒾𝓃 𝒪𝓃𝓁𝓎!*\n\n"
+                "𝒴𝑜𝓊 𝓃𝑒𝑒𝒹 𝓉𝑜 𝒷𝑒 𝒶𝓃 𝒶𝒹𝓂𝒾𝓃 𝓉𝑜 𝓊𝓈𝑒 𝓉𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        target_user = await get_user_from_input(update, context)
+        if not target_user:
+            await update.message.reply_text(
+                "🚫 *𝒰𝓈𝒶𝑔𝑒:* /ban @username\n"
+                "🚫 *𝒪𝓇 𝓇𝑒𝓅𝓁𝓎 𝓉𝑜 𝓈𝑜𝓂𝑒𝑜𝓃𝑒'𝓈 𝓂𝑒𝓈𝓈𝒶𝑔𝑒 𝓌𝒾𝓉𝒽* /ban",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Check if trying to ban self
+        if target_user['id'] == update.effective_user.id:
+            await update.message.reply_text("🤨 *𝒴𝑜𝓊 𝒸𝒶𝓃'𝓉 𝒷𝒶𝓃 𝓎𝑜𝓊𝓇𝓈𝑒𝓁𝒻!*")
+            return
+        
+        # Check if trying to ban bot
+        if target_user['id'] == context.bot.id:
+            await update.message.reply_text("🌸 *𝐼 𝒸𝒶𝓃'𝓉 𝒷𝒶𝓃 𝓂𝓎𝓈𝑒𝓁𝒻!* 𝒯𝒽𝒶𝓉'𝓈 𝓈𝒾𝓁𝓁𝓎! 😊")
+            return
+        
+        try:
+            # Ban the user
+            await context.bot.ban_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=target_user['id']
+            )
+            
+            # Update group banned users
+            group_data = db.get_group(update.effective_chat.id)
+            banned_users = group_data['banned_users']
+            if target_user['id'] not in banned_users:
+                banned_users.append(target_user['id'])
+            db.update_group(update.effective_chat.id, {'banned_users': json.dumps(banned_users)})
+            
+            await update.message.reply_text(
+                f"🚫 *𝒰𝓈𝑒𝓇 𝐵𝒶𝓃𝓃𝑒𝒹!* 🚫\n\n"
+                f"👤 *𝒰𝓈𝑒𝓇:* {target_user['name']}\n"
+                f"👮 *𝐵𝓎:* {update.effective_user.first_name}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logging.error(f"Ban error: {e}")
+            await update.message.reply_text("❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝒷𝒶𝓃 𝓊𝓈𝑒𝓇!* ❌\n\n𝒞𝒽𝑒𝒸𝓀 𝓂𝓎 𝓅𝑒𝓇𝓂𝒾𝓈𝓈𝒾𝑜𝓃𝓈.")
+            
+    except Exception as e:
+        logging.error(f"Ban command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝒷𝒶𝓃𝓃𝒾𝓃𝑔 𝓊𝓈𝑒𝓇!* ❌")
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unban a user from group (admin only)"""
+    try:
+        if update.effective_chat.type == "private":
+            await update.message.reply_text("❌ *𝒯𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹 𝓌𝑜𝓇𝓀𝓈 𝒾𝓃 𝑔𝓇𝑜𝓊𝓅𝓈 𝑜𝓃𝓁𝓎!* ❌")
+            return
+        
+        # Check if user is group admin
+        if not await is_group_admin(context.bot, update.effective_chat.id, update.effective_user.id):
+            await update.message.reply_text(
+                "⛔ *𝒜𝒹𝓂𝒾𝓃 𝒪𝓃𝓁𝓎!*\n\n"
+                "𝒴𝑜𝓊 𝓃𝑒𝑒𝒹 𝓉𝑜 𝒷𝑒 𝒶𝓃 𝒶𝒹𝓂𝒾𝓃 𝓉𝑜 𝓊𝓈𝑒 𝓉𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        target_user = await get_user_from_input(update, context)
+        if not target_user:
+            await update.message.reply_text(
+                "✅ *𝒰𝓈𝒶𝑔𝑒:* /unban @username\n"
+                "✅ *𝒪𝓇 𝓇𝑒𝓅𝓁𝓎 𝓉𝑜 𝓈𝑜𝓂𝑒𝑜𝓃𝑒'𝓈 𝓂𝑒𝓈𝓈𝒶𝑔𝑒 𝓌𝒾𝓉𝒽* /unban",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        try:
+            # Unban the user
+            await context.bot.unban_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=target_user['id'],
+                only_if_banned=True
+            )
+            
+            # Update group banned users
+            group_data = db.get_group(update.effective_chat.id)
+            banned_users = group_data['banned_users']
+            if target_user['id'] in banned_users:
+                banned_users.remove(target_user['id'])
+            db.update_group(update.effective_chat.id, {'banned_users': json.dumps(banned_users)})
+            
+            await update.message.reply_text(
+                f"✅ *𝒰𝓈𝑒𝓇 𝒰𝓃𝒷𝒶𝓃𝓃𝑒𝒹!* ✅\n\n"
+                f"👤 *𝒰𝓈𝑒𝓇:* {target_user['name']}\n"
+                f"👮 *𝐵𝓎:* {update.effective_user.first_name}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logging.error(f"Unban error: {e}")
+            await update.message.reply_text("❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝓊𝓃𝒷𝒶𝓃 𝓊𝓈𝑒𝓇!* ❌")
+            
+    except Exception as e:
+        logging.error(f"Unban command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓊𝓃𝒷𝒶𝓃𝓃𝒾𝓃𝑔 𝓊𝓈𝑒𝓇!* ❌")
+
+async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mute a user in group (admin only)"""
+    try:
+        if update.effective_chat.type == "private":
+            await update.message.reply_text("❌ *𝒯𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹 𝓌𝑜𝓇𝓀𝓈 𝒾𝓃 𝑔𝓇𝑜𝓊𝓅𝓈 𝑜𝓃𝓁𝓎!* ❌")
+            return
+        
+        # Check if user is group admin
+        if not await is_group_admin(context.bot, update.effective_chat.id, update.effective_user.id):
+            await update.message.reply_text(
+                "⛔ *𝒜𝒹𝓂𝒾𝓃 𝒪𝓃𝓁𝓎!*\n\n"
+                "𝒴𝑜𝓊 𝓃𝑒𝑒𝒹 𝓉𝑜 𝒷𝑒 𝒶𝓃 𝒶𝒹𝓂𝒾𝓃 𝓉𝑜 𝓊𝓈𝑒 𝓉𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        if not context.args or len(context.args) < 1:
+            await update.message.reply_text(
+                "🔇 *𝒰𝓈𝒶𝑔𝑒:* /mute @username [𝓂𝒾𝓃𝓊𝓉𝑒𝓈]\n"
+                "🔇 *𝒪𝓇 𝓇𝑒𝓅𝓁𝓎 𝓉𝑜 𝓂𝑒𝓈𝓈𝒶𝑔𝑒:* /mute [𝓂𝒾𝓃𝓊𝓉𝑒𝓈]\n\n"
+                "*𝒟𝑒𝒻𝒶𝓊𝓁𝓉:* 60 𝓂𝒾𝓃𝓊𝓉𝑒𝓈\n"
+                "*𝑀𝒶𝓍𝒾𝓂𝓊𝓂:* 1 𝓌𝑒𝑒𝓀 (10080 𝓂𝒾𝓃𝓊𝓉𝑒𝓈)",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        target_user = await get_user_from_input(update, context)
+        if not target_user:
+            await update.message.reply_text("❌ *𝒰𝓈𝑒𝓇 𝓃𝑜𝓉 𝒻𝑜𝓊𝓃𝒹!* ❌")
+            return
+        
+        # Get mute duration
+        try:
+            if target_user['id'] == update.effective_user.id:
+                minutes = 60  # Default if replying
+            else:
+                minutes = int(context.args[1]) if len(context.args) > 1 else 60
+            
+            if minutes < 1 or minutes > 10080:
+                await update.message.reply_text("❌ *𝒟𝓊𝓇𝒶𝓉𝒾𝑜𝓃: 1-10080 𝓂𝒾𝓃𝓊𝓉𝑒𝓈 (1 𝓌𝑒𝑒𝓀)* ❌")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ *𝐼𝓃𝓋𝒶𝓁𝒾𝒹 𝒹𝓊𝓇𝒶𝓉𝒾𝑜𝓃!* ❌")
+            return
+        
+        # Check if trying to mute self
+        if target_user['id'] == update.effective_user.id:
+            await update.message.reply_text("🤐 *𝒴𝑜𝓊 𝒸𝒶𝓃'𝓉 𝓂𝓊𝓉𝑒 𝓎𝑜𝓊𝓇𝓈𝑒𝓁𝒻!*")
+            return
+        
+        # Check if trying to mute bot
+        if target_user['id'] == context.bot.id:
+            await update.message.reply_text("🌸 *𝐼 𝒸𝒶𝓃'𝓉 𝓂𝓊𝓉𝑒 𝓂𝓎𝓈𝑒𝓁𝒻!* 𝒯𝒽𝒶𝓉'𝓈 𝓈𝒾𝓁𝓁𝓎! 😊")
+            return
+        
+        try:
+            # Mute the user
+            until_date = datetime.now() + timedelta(minutes=minutes)
+            await context.bot.restrict_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=target_user['id'],
+                permissions=ChatPermissions(
+                    can_send_messages=False,
+                    can_send_media_messages=False,
+                    can_send_polls=False,
+                    can_send_other_messages=False,
+                    can_add_web_page_previews=False
+                ),
+                until_date=until_date
+            )
+            
+            # Update group muted users
+            group_data = db.get_group(update.effective_chat.id)
+            muted_users = group_data['muted_users']
+            muted_users[str(target_user['id'])] = {
+                'until': until_date.isoformat(),
+                'by': update.effective_user.id,
+                'muted_at': datetime.now().isoformat()
+            }
+            db.update_group(update.effective_chat.id, {'muted_users': json.dumps(muted_users)})
+            
+            hours = minutes // 60
+            remaining_minutes = minutes % 60
+            
+            await update.message.reply_text(
+                f"🔇 *𝒰𝓈𝑒𝓇 𝑀𝓊𝓉𝑒𝒹!* 🔇\n\n"
+                f"👤 *𝒰𝓈𝑒𝓇:* {target_user['name']}\n"
+                f"⏰ *𝒟𝓊𝓇𝒶𝓉𝒾𝑜𝓃:* {hours}𝒽 {remaining_minutes}𝓂\n"
+                f"👮 *𝐵𝓎:* {update.effective_user.first_name}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logging.error(f"Mute error: {e}")
+            await update.message.reply_text("❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝓂𝓊𝓉𝑒 𝓊𝓈𝑒𝓇!* ❌\n\n𝒞𝒽𝑒𝒸𝓀 𝓂𝓎 𝓅𝑒𝓇𝓂𝒾𝓈𝓈𝒾𝑜𝓃𝓈.")
+            
+    except Exception as e:
+        logging.error(f"Mute command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓂𝓊𝓉𝒾𝓃𝑔 𝓊𝓈𝑒𝓇!* ❌")
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unmute a user in group (admin only)"""
+    try:
+        if update.effective_chat.type == "private":
+            await update.message.reply_text("❌ *𝒯𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹 𝓌𝑜𝓇𝓀𝓈 𝒾𝓃 𝑔𝓇𝑜𝓊𝓅𝓈 𝑜𝓃𝓁𝓎!* ❌")
+            return
+        
+        # Check if user is group admin
+        if not await is_group_admin(context.bot, update.effective_chat.id, update.effective_user.id):
+            await update.message.reply_text(
+                "⛔ *𝒜𝒹𝓂𝒾𝓃 𝒪𝓃𝓁𝓎!*\n\n"
+                "𝒴𝑜𝓊 𝓃𝑒𝑒𝒹 𝓉𝑜 𝒷𝑒 𝒶𝓃 𝒶𝒹𝓂𝒾𝓃 𝓉𝑜 𝓊𝓈𝑒 𝓉𝒽𝒾𝓈 𝒸𝑜𝓂𝓂𝒶𝓃𝒹!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        target_user = await get_user_from_input(update, context)
+        if not target_user:
+            await update.message.reply_text(
+                "🔊 *𝒰𝓈𝒶𝑔𝑒:* /unmute @username\n"
+                "🔊 *𝒪𝓇 𝓇𝑒𝓅𝓁𝓎 𝓉𝑜 𝓈𝑜𝓂𝑒𝑜𝓃𝑒'𝓈 𝓂𝑒𝓈𝓈𝒶𝑔𝑒 𝓌𝒾𝓉𝒽* /unmute",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        try:
+            # Unmute the user
+            await context.bot.restrict_chat_member(
+                chat_id=update.effective_chat.id,
+                user_id=target_user['id'],
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_media_messages=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_change_info=False,
+                    can_invite_users=True,
+                    can_pin_messages=False
+                )
+            )
+            
+            # Update group muted users
+            group_data = db.get_group(update.effective_chat.id)
+            muted_users = group_data['muted_users']
+            if str(target_user['id']) in muted_users:
+                del muted_users[str(target_user['id'])]
+            db.update_group(update.effective_chat.id, {'muted_users': json.dumps(muted_users)})
+            
+            await update.message.reply_text(
+                f"🔊 *𝒰𝓈𝑒𝓇 𝒰𝓃𝓂𝓊𝓉𝑒𝒹!* 🔊\n\n"
+                f"👤 *𝒰𝓈𝑒𝓇:* {target_user['name']}\n"
+                f"👮 *𝐵𝓎:* {update.effective_user.first_name}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logging.error(f"Unmute error: {e}")
+            await update.message.reply_text("❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝓊𝓃𝓂𝓊𝓉𝑒 𝓊𝓈𝑒𝓇!* ❌")
+            
+    except Exception as e:
+        logging.error(f"Unmute command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓊𝓃𝓂𝓊𝓉𝒾𝓃𝑔 𝓊𝓈𝑒𝓇!* ❌")
+
+# ========== OWNER PRICE MANAGEMENT ==========
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner command to manage all prices"""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ *𝒪𝓌𝓃𝑒𝓇 𝑜𝓃𝓁𝓎 𝒸𝑜𝓂𝓂𝒶𝓃𝒹!* ❌")
+        return
+    
+    # Create price management keyboard
+    keyboard = [
+        [
+            InlineKeyboardButton("💀 𝒦𝒾𝓁𝒹 𝐶𝑜𝓈𝓉", callback_data="price_kill_cost"),
+            InlineKeyboardButton("💖 𝑅𝑒𝓋𝒾𝓋𝑒 𝐶𝑜𝓈𝓉", callback_data="price_revive_cost")
+        ],
+        [
+            InlineKeyboardButton("🎫 𝐿𝑜𝓉𝓉𝑒𝓇𝓎 𝒯𝒾𝒸𝓀𝑒𝓉", callback_data="price_lottery_ticket"),
+            InlineKeyboardButton("🏆 𝐿𝑜𝓉𝓉𝑒𝓇𝓎 𝒫𝓇𝒾𝓏𝑒", callback_data="price_lottery_prize")
+        ],
+        [
+            InlineKeyboardButton("🛡️ 𝒫𝓇𝑜𝓉𝑒𝒸𝓉𝒾𝑜𝓃", callback_data="price_protection"),
+            InlineKeyboardButton("💸 𝒯𝒶𝓍 𝑅𝒶𝓉𝑒", callback_data="price_tax_rate")
+        ],
+        [
+            InlineKeyboardButton("🏦 𝐵𝒶𝓃𝓀 𝐹𝑒𝑒𝓈", callback_data="price_bank_fees"),
+            InlineKeyboardButton("🎮 𝐺𝒶𝓂𝑒 𝒮𝑒𝓉𝓉𝒾𝓃𝑔𝓈", callback_data="price_game_settings")
+        ],
+        [
+            InlineKeyboardButton("📊 𝒱𝒾𝑒𝓌 𝒜𝓁𝓁 𝒫𝓇𝒾𝒸𝑒𝓈", callback_data="view_all_prices"),
+            InlineKeyboardButton("🔙 𝒪𝓌𝓃𝑒𝓇 𝑀𝑒𝓃𝓊", callback_data="owner_menu")
+        ]
+    ]
+    
+    await update.message.reply_text(
+        """
+👑 *𝒫𝓇𝒾𝒸𝑒 𝑀𝒶𝓃𝒶𝑔𝑒𝓂𝑒𝓃𝓉* 👑
+
+𝒮𝑒𝓁𝑒𝒸𝓉 𝒶 𝒸𝒶𝓉𝑒𝑔𝑜𝓇𝓎 𝓉𝑜 𝓂𝒶𝓃𝒶𝑔𝑒 𝓅𝓇𝒾𝒸𝑒𝓈:
+
+💀 *𝒦𝒾𝓁𝓁/𝑅𝑒𝓋𝒾𝓋𝑒* - 𝒜𝓉𝓉𝒶𝒸𝓀 𝒶𝓃𝒹 𝒽𝑒𝒶𝓁𝒾𝓃𝑔 𝒸𝑜𝓈𝓉𝓈
+🎫 *𝐿𝑜𝓉𝓉𝑒𝓇𝓎* - 𝒯𝒾𝒸𝓀𝑒𝓉 𝓅𝓇𝒾𝒸𝑒𝓈 𝒶𝓃𝒹 𝓅𝓇𝒾𝓏𝑒𝓈
+🛡️ *𝒫𝓇𝑜𝓉𝑒𝒸𝓉𝒾𝑜𝓃* - 𝒮𝒶𝒻𝑒𝓉𝓎 𝒻𝑒𝑒𝓈
+🏦 *𝐵𝒶𝓃𝓀* - 𝒟𝑒𝓅𝑜𝓈𝒾𝓉/𝓌𝒾𝓉𝒽𝒹𝓇𝒶𝓌 𝒻𝑒𝑒𝓈
+🎮 *𝒢𝒶𝓂𝑒𝓈* - 𝐸𝓃𝓉𝓇𝓎 𝒻𝑒𝑒𝓈 𝒶𝓃𝒹 𝓉𝒶𝓍
+
+💡 *𝒞𝓁𝒾𝒸𝓀 𝒶 𝒷𝓊𝓉𝓉𝑜𝓃 𝓉𝑜 𝒶𝒹𝒿𝓊𝓈𝓉 𝓅𝓇𝒾𝒸𝑒𝓈*
+        """,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def view_prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View all current prices"""
+    try:
+        prices_text = """
+💰 *𝒞𝓊𝓇𝓇𝑒𝓃𝓉 𝒫𝓇𝒾𝒸𝑒𝓈* 💰
+
+*💀 𝒞𝑜𝓂𝒷𝒶𝓉:*
+• 𝒦𝒾𝓁𝓁 𝒸𝑜𝓈𝓉: {kill_cost}
+• 𝑅𝑒𝓋𝒾𝓋𝑒 𝒸𝑜𝓈𝓉: {revive_cost}
+• 𝒦𝒾𝓁𝓁 𝓈𝓊𝒸𝒸𝑒𝓈𝓈 𝓇𝒶𝓉𝑒: {kill_success}%
+• 𝑅𝑜𝒷 𝓈𝓊𝒸𝒸𝑒𝓈𝓈 𝓇𝒶𝓉𝑒: {rob_success}%
+
+*🛡️ 𝒫𝓇𝑜𝓉𝑒𝒸𝓉𝒾𝑜𝓃:*
+• 1 𝒹𝒶𝓎: {protect_1}
+• 2 𝒹𝒶𝓎𝓈: {protect_2}
+• 3 𝒹𝒶𝓎𝓈: {protect_3}
+
+*🏦 𝐵𝒶𝓃𝓀𝒾𝓃𝑔:*
+• 𝒟𝑒𝓅𝑜𝓈𝒾𝓉 𝒻𝑒𝑒: {deposit_fee}%
+• 𝒲𝒾𝓉𝒽𝒹𝓇𝒶𝓌 𝒻𝑒𝑒: {withdraw_fee}%
+• 𝑀𝒶𝓍 𝒷𝒶𝓃𝓀: {max_bank}% 𝓸𝓯 𝓽𝓸𝓽𝓪𝓵
+
+*🎮 𝒢𝒶𝓂𝑒𝓈:*
+• 𝒯𝒶𝓍 𝓇𝒶𝓉𝑒: {tax_rate}%
+• 𝐿𝑒𝒶𝓋𝑒 𝓅𝑒𝓃𝒶𝓁𝓉𝓎: {leave_penalty}
+• 𝒢𝒶𝓂𝑒 𝒶𝓊𝓉𝑜-𝒸𝒶𝓃𝒸𝑒𝓁: {game_wait} 𝓈𝑒𝒸
+
+*🎫 𝐿𝑜𝓉𝓉𝑒𝓇𝓎:*
+• 𝒯𝒾𝒸𝓀𝑒𝓉 𝓅𝓇𝒾𝒸𝑒: {ticket_price}
+• 𝐵𝒶𝓈𝑒 𝓅𝓇𝒾𝓏𝑒: {lottery_prize}
+
+*📊 𝑂𝓉𝒽𝑒𝓇:*
+• 𝒟𝒶𝒾𝓁𝓎 𝒷𝑜𝓃𝓊𝓈: {daily_bonus}
+• 𝒲𝑜𝓇𝓀 𝓇𝒶𝓃𝑔𝑒: {work_min}-{work_max}
+        """
+        
+        # Get all prices
+        prices = {
+            'kill_cost': format_money(db.get_bot_setting('kill_cost', 500)),
+            'revive_cost': format_money(db.get_bot_setting('revive_cost', 1000)),
+            'kill_success': db.get_bot_setting('kill_success_rate', 50),
+            'rob_success': db.get_bot_setting('rob_success_rate', 40),
+            'protect_1': format_money(db.get_bot_setting('protection_prices', {1: 200, 2: 400, 3: 600}).get(1, 200)),
+            'protect_2': format_money(db.get_bot_setting('protection_prices', {1: 200, 2: 400, 3: 600}).get(2, 400)),
+            'protect_3': format_money(db.get_bot_setting('protection_prices', {1: 200, 2: 400, 3: 600}).get(3, 600)),
+            'deposit_fee': db.get_bot_setting('bank_deposit_fee', 1),
+            'withdraw_fee': db.get_bot_setting('bank_withdraw_fee', 2),
+            'max_bank': db.get_bot_setting('max_bank_percentage', 70),
+            'tax_rate': db.get_bot_setting('tax_rate', 10),
+            'leave_penalty': format_money(db.get_bot_setting('leave_penalty', 10)),
+            'game_wait': db.get_bot_setting('game_wait_time', 180),
+            'ticket_price': format_money(db.get_bot_setting('lottery_ticket_price', 100)),
+            'lottery_prize': format_money(db.get_bot_setting('lottery_prize_base', 1000)),
+            'daily_bonus': format_money(db.get_bot_setting('daily_bonus_base', 100)),
+            'work_min': format_money(db.get_bot_setting('work_min', 100)),
+            'work_max': format_money(db.get_bot_setting('work_max', 500))
+        }
+        
+        prices_text = prices_text.format(**prices)
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("👑 𝐸𝒹𝒾𝓉 𝒫𝓇𝒾𝒸𝑒𝓈", callback_data="price_menu"),
+                InlineKeyboardButton("📊 𝐹𝓊𝓁𝓁 𝒮𝑒𝓉𝓉𝒾𝓃𝑔𝓈", callback_data="view_all_settings")
+            ]
+        ]
+        
+        if is_owner(update.effective_user.id):
+            keyboard.append([
+                InlineKeyboardButton("🔄 𝑅𝑒𝓈𝑒𝓉 𝒟𝑒𝒻𝒶𝓊𝓁𝓉𝓈", callback_data="reset_prices")
+            ])
+        
+        await update.message.reply_text(
+            prices_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        logging.error(f"View prices error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓈𝒽𝑜𝓌𝒾𝓃𝑔 𝓅𝓇𝒾𝒸𝑒𝓈!* ❌")
+
+# ========== COUPLES COMMAND ==========
+async def couples_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show couple of the day"""
+    try:
+        if update.effective_chat.type == "private":
+            await update.message.reply_text(
+                "💖 *𝐹𝒾𝓃𝒹 𝓁𝑜𝓋𝑒 𝒾𝓃 𝑔𝓇𝑜𝓊𝓅𝓈!*\n"
+                "𝒥𝑜𝒾𝓃 𝒶 𝑔𝓇𝑜𝓊𝓅 𝓉𝑜 𝓈𝑒𝑒 𝓉𝒽𝑒 𝒸𝑜𝓊𝓅𝓁𝑒 𝑜𝒻 𝓉𝒽𝑒 𝒹𝒶𝓎!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        group_id = update.effective_chat.id
+        group_data = db.get_group(group_id)
+        
+        # Check if already shown today
+        today = datetime.now().date().isoformat()
+        if group_data.get('last_couple_show') == today:
+            # Get today's couple
+            couple = db.get_todays_couple(group_id)
+            if couple:
+                user1_info = await get_user_info(context, couple['user1_id'])
+                user2_info = await get_user_info(context, couple['user2_id'])
+                
+                await update.message.reply_text(
+                    f"""
+💖 *𝒯𝑜𝒹𝒶𝓎'𝓈 𝒞𝑜𝓊𝓅𝓁𝑒* 💖
+
+❤️ *{user1_info['name']}* 💕 *{user2_info['name']}*
+
+"𝑇𝓌𝑜 𝓈𝑜𝓊𝓁𝓈, 𝑜𝓃𝑒 𝒽𝑒𝒶𝓇𝓉, 𝒻𝑜𝓇𝑒𝓋𝑒𝓇 𝒸𝑜𝓃𝓃𝑒𝒸𝓉𝑒𝒹."
+
+🌟 *𝒱𝑜𝓉𝑒𝓈:* {couple.get('votes', 0)}
+📅 *𝒮𝒽𝑜𝓌𝓃:* 𝒯𝑜𝒹𝒶𝓎
+
+💝 *𝒮𝑒𝓃𝒹 𝓉𝒽𝑒𝓂 𝓈𝑜𝓂𝑒 𝓁𝑜𝓋𝑒!*
+                    """,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+        
+        # Select random couple from active users
+        active_games = db.get_active_games_in_group(group_id)
+        all_players = set()
+        
+        for game in active_games:
+            all_players.add(game['started_by'])
+            all_players.update(game['players'])
+        
+        all_players = list(all_players)
+        
+        if len(all_players) >= 2:
+            # Select two random players
+            random.shuffle(all_players)
+            user1_id = all_players[0]
+            user2_id = all_players[1]
+            
+            # Ensure they're different
+            while user2_id == user1_id and len(all_players) > 1:
+                user2_id = random.choice(all_players)
+            
+            user1_info = await get_user_info(context, user1_id)
+            user2_info = await get_user_info(context, user2_id)
+            
+            # Add to database
+            couple_id = db.add_couple(group_id, user1_id, user2_id)
+            
+            # Update group
+            db.update_group(group_id, {'last_couple_show': today})
+            
+            # Romantic messages
+            romantic_messages = [
+                f"𝒯𝓌𝑜 𝓈𝓉𝒶𝓇𝓈 𝒶𝓁𝒾𝑔𝓃𝑒𝒹 𝒾𝓃 𝓉𝒽𝑒 𝓈𝓀𝓎! ✨",
+                f"𝒟𝑒𝓈𝓉𝒾𝓃𝓎 𝒷𝓇𝑜𝓊𝑔𝒽𝓉 𝓉𝒽𝑒𝓂 𝓉𝑜𝑔𝑒𝓉𝒽𝑒𝓇! 💫",
+                f"𝒜 𝓂𝒶𝓉𝒸𝒽 𝓂𝒶𝒹𝑒 𝒾𝓃 𝒽𝑒𝒶𝓋𝑒𝓃! 🌟",
+                f"𝑇𝓌𝑜 𝒽𝑒𝒶𝓇𝓉𝓈 𝒷𝑒𝒶𝓉𝒾𝓃𝑔 𝒶𝓈 𝑜𝓃𝑒! 💓",
+                f"𝒯𝒽𝑒 𝒸𝒽𝑒𝓂𝒾𝓈𝓉𝓇𝓎 𝒾𝓈 𝓊𝓃𝒹𝑒𝓃𝒾𝒶𝒷𝓁𝑒! 💖"
+            ]
+            
+            await update.message.reply_text(
+                f"""
+💖 *𝗖𝗢𝗨𝗣𝗟𝗘 𝗢𝗙 𝗧𝗛𝗘 𝗗𝗔𝗬* 💖
+
+✨ *{user1_info['name']}* ❤️ *{user2_info['name']}*
+
+{random.choice(romantic_messages)}
+
+"𝐿𝑜𝓋𝑒 𝒾𝓈 𝓃𝑜𝓉 𝒶𝒷𝑜𝓊𝓉 𝒻𝒾𝓃𝒹𝒾𝓃𝑔 𝓉𝒽𝑒 𝓇𝒾𝑔𝒽𝓉 𝓅𝑒𝓇𝓈𝑜𝓃, 
+𝒷𝓊𝓉 𝒸𝓇𝑒𝒶𝓉𝒾𝓃𝑔 𝓉𝒽𝑒 𝓇𝒾𝑔𝒽𝓉 𝓇𝑒𝓁𝒶𝓉𝒾𝑜𝓃𝓈𝒽𝒾𝓅."
+
+🎯 *𝐼𝒻 𝓎𝑜𝓊 𝓈𝑒𝑒 𝓉𝒽𝑒𝓂 𝓉𝑜𝑔𝑒𝓉𝒽𝑒𝓇, 𝓈𝑒𝓃𝒹 𝓉𝒽𝑒𝓂 𝓎𝑜𝓊𝓇 𝒷𝓁𝑒𝓈𝓈𝒾𝓃𝑔𝓈!*
+
+💝 *𝒱𝑜𝓉𝑒 𝒻𝑜𝓇 𝓉𝒽𝑒𝓂:* 👍
+                """,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                "💔 *𝒩𝑜𝓉 𝑒𝓃𝑜𝓊𝑔𝒽 𝒶𝒸𝓉𝒾𝓋𝑒 𝓅𝓁𝒶𝓎𝑒𝓇𝓈!* 💔\n\n"
+                "𝒥𝑜𝒾𝓃 𝓈𝑜𝓂𝑒 𝑔𝒶𝓂𝑒𝓈 𝒶𝓃𝒹 𝒸𝑜𝓂𝑒 𝒷𝒶𝒸𝓀 𝓉𝑜𝓂𝑜𝓇𝓇𝑜𝓌!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+    except Exception as e:
+        logging.error(f"Couples command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝒻𝒾𝓃𝒹𝒾𝓃𝑔 𝒸𝑜𝓊𝓅𝓁𝑒!* ❌")
+
+# ========== HELP BOOK WITH PAGINATION ==========
+async def book_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Interactive help book with pagination"""
+    try:
+        page = 1
+        if context.args:
+            try:
+                page = int(context.args[0])
+                if page < 1:
+                    page = 1
+            except:
+                pass
+        
+        pages = {
+            1: """
+📘 *𝒮𝒽𝒾𝓏𝓊𝓀𝒶 𝐵𝑜𝓉 𝒢𝓊𝒾𝒹𝑒 - 𝒫𝒶𝑔𝑒 1/5* 📘
+
+🌸 *𝒲𝑒𝓁𝒸𝑜𝓂𝑒 𝓉𝑜 𝒮𝒽𝒾𝓏𝓊𝓀𝒶'𝓈 𝒲𝑜𝓇𝓁𝒹!* 🌸
+
+𝐼'𝓂 𝓎𝑜𝓊𝓇 𝒻𝓇𝒾𝑒𝓃𝒹𝓁𝓎 𝒸𝑜𝓂𝓅𝒶𝓃𝒾𝑜𝓃 𝒷𝑜𝓉, 𝒹𝑒𝓈𝒾𝑔𝓃𝑒𝒹 𝓉𝑜 𝒷𝓇𝒾𝓃𝑔 𝒿𝑜𝓎 𝒶𝓃𝒹 𝒻𝓊𝓃 𝓉𝑜 𝓎𝑜𝓊𝓇 𝑔𝓇𝑜𝓊𝓅𝓈!
+
+*✨ 𝒦𝑒𝓎 𝐹𝑒𝒶𝓉𝓊𝓇𝑒𝓈:*
+• 💰 𝒱𝒾𝓇𝓉𝓊𝒶𝓁 𝐸𝒸𝑜𝓃𝑜𝓂𝓎 𝒮𝓎𝓈𝓉𝑒𝓂
+• 🎮 𝐸𝓍𝒸𝒾𝓉𝒾𝓃𝑔 𝑀𝓊𝓁𝓉𝒾𝒫𝓁𝒶𝓎𝑒𝓇 𝒢𝒶𝓂𝑒𝓈
+• 🛍️ 𝐼𝓉𝑒𝓂 𝒮𝒽𝑜𝓅 𝒶𝓃𝒹 𝒢𝒾𝒻𝓉𝓈
+• 👥 𝒮𝑜𝒸𝒾𝒶𝓁 𝐼𝓃𝓉𝑒𝓇𝒶𝒸𝓉𝒾𝑜𝓃𝓈
+• 🤖 𝒜𝐼 𝒞𝒽𝒶𝓉 𝒞𝑜𝓂𝓅𝒶𝓃𝒾𝑜𝓃
+• 🏦 𝒮𝑒𝒸𝓊𝓇𝑒 𝐵𝒶𝓃𝓀𝒾𝓃𝑔 𝒮𝓎𝓈𝓉𝑒𝓂
+
+*🚀 𝒢𝑒𝓉𝓉𝒾𝓃𝑔 𝒮𝓉𝒶𝓇𝓉𝑒𝒹:*
+1. 𝒰𝓈𝑒 /start 𝓉𝑜 𝒷𝑒𝑔𝒾𝓃
+2. 𝒞𝓁𝒶𝒾𝓂 𝓎𝑜𝓊𝓇 /daily 𝒷𝑜𝓃𝓊𝓈
+3. 𝒞𝒽𝑒𝒸𝓀 𝓎𝑜𝓊𝓇 /balance
+4. 𝒥𝑜𝒾𝓃 𝑜𝓇 𝓈𝓉𝒶𝓇𝓉 𝑔𝒶𝓂𝑒𝓈
+
+𝒩𝑒𝓍𝓉: 𝐸𝒸𝑜𝓃𝑜𝓂𝓎 𝒮𝓎𝓈𝓉𝑒𝓂 ➡️
+            """,
+            
+            2: """
+📘 *𝐸𝒸𝑜𝓃𝑜𝓂𝓎 𝒮𝓎𝓈𝓉𝑒𝓂 - 𝒫𝒶𝑔𝑒 2/5* 📘
+
+💰 *𝐻𝑜𝓌 𝓉𝑜 𝐸𝒶𝓇𝓃 𝑀𝑜𝓃𝑒𝓎:*
+
+*📅 𝒟𝒶𝒾𝓁𝓎 𝐵𝑜𝓃𝓊𝓈:*
+/𝒹𝒶𝒾𝓁𝓎 - 𝒞𝓁𝒶𝒾𝓂 𝒹𝒶𝒾𝓁𝓎 𝓇𝑒𝓌𝒶𝓇𝒹 (𝒟𝑀 𝑜𝓃𝓁𝓎)
+𝒮𝓉𝓇𝑒𝒶𝓀 𝓈𝓎𝓈𝓉𝑒𝓂: 𝒽𝒾𝑔𝒽𝑒𝓇 𝓈𝓉𝓇𝑒𝒶𝓀 = 𝒷𝒾𝑔𝑔𝑒𝓇 𝒷𝑜𝓃𝓊𝓈
+
+*🛠️ 𝒲𝑜𝓇𝓀:*
+/𝓌𝑜𝓇𝓀 - 𝐸𝒶𝓇𝓃 𝓂𝑜𝓃𝑒𝓎 𝒽𝑜𝓊𝓇𝓁𝓎
+𝑅𝒶𝓃𝑔𝑒: {𝓌𝑜𝓇𝓀_𝓂𝒾𝓃} - {𝓌𝑜𝓇𝓀_𝓂𝒶𝓍} 𝓅𝑒𝓇 𝒽𝑜𝓊𝓇
+
+*🎮 𝒢𝒶𝓂𝑒𝓈:*
+𝒥𝑜𝒾𝓃 𝑔𝒶𝓂𝑒𝓈 𝓉𝑜 𝓌𝒾𝓃 𝒷𝒾𝑔 𝓅𝓇𝒾𝓏𝑒𝓈!
+𝒯𝒶𝓍: {𝓉𝒶𝓍_𝓇𝒶𝓉𝑒}% 𝒸𝒽𝒶𝓇𝑔𝑒 𝑜𝓃 𝓌𝒾𝓃𝓃𝒾𝓃𝑔𝓈
+
+*🏦 𝐵𝒶𝓃𝓀𝒾𝓃𝑔:*
+/𝒹𝑒𝓅𝑜𝓈𝒾𝓉 - 𝒮𝓉𝑜𝓇𝑒 𝓂𝑜𝓃𝑒𝓎 𝓈𝒶𝒻𝑒𝓁𝓎
+/𝓌𝒾𝓉𝒽𝒹𝓇𝒶𝓌 - 𝒯𝒶𝓀𝑒 𝓂𝑜𝓃𝑒𝓎 𝑜𝓊𝓉
+𝒮𝒶𝒻𝑒 𝒻𝓇𝑜𝓂: 𝓇𝑜𝒷𝒷𝑒𝓇𝓎 & 𝓀𝒾𝓁𝓁𝓈
+
+𝒩𝑒𝓍𝓉: 𝒢𝒶𝓂𝑒𝓈 𝒶𝓃𝒹 𝒞𝑜𝓂𝒷𝒶𝓉 ➡️
+            """.format(
+                𝓌𝑜𝓇𝓀_𝓂𝒾𝓃=format_money(db.get_bot_setting('work_min', 100)),
+                𝓌𝑜𝓇𝓀_𝓂𝒶𝓍=format_money(db.get_bot_setting('work_max', 500)),
+                𝓉𝒶𝓍_𝓇𝒶𝓉𝑒=db.get_bot_setting('tax_rate', 10)
+            ),
+            
+            3: """
+📘 *𝒢𝒶𝓂𝑒𝓈 & 𝒞𝑜𝓂𝒷𝒶𝓉 - 𝒫𝒶𝑔𝑒 3/5* 📘
+
+*🎮 𝑀𝓊𝓁𝓉𝒾𝒫𝓁𝒶𝓎𝑒𝓇 𝒢𝒶𝓂𝑒𝓈:*
+/𝒷𝑜𝓂𝒷 𝒶𝓂𝑜𝓊𝓃𝓉 - 𝒮𝓉𝒶𝓇𝓉 𝒷𝑜𝓂𝒷 𝑔𝒶𝓂𝑒
+/𝓌𝑜𝓇𝒹𝑔𝒶𝓂𝑒 𝒶𝓂𝑜𝓊𝓃𝓉 - 𝒮𝓉𝒶𝓇𝓉 𝓌𝑜𝓇𝒹 𝑔𝒶𝓂𝑒
+/𝒿𝑜𝒾𝓃 𝒶𝓂𝑜𝓊𝓃𝓉 - 𝒥𝑜𝒾𝓃 𝒶 𝑔𝒶𝓂𝑒
+/𝓁𝑒𝒶𝓋𝑒 - 𝐿𝑒𝒶𝓋𝑒 𝒸𝓊𝓇𝓇𝑒𝓃𝓉 𝑔𝒶𝓂𝑒
+
+*⚔️ 𝒞𝑜𝓂𝒷𝒶𝒹 𝒢𝒶𝓂𝑒𝓈:*
+/𝓀𝒾𝓁𝓁 @𝓊𝓈𝑒𝓇 - 𝒜𝓉𝓉𝒶𝒸𝓀 𝓈𝑜𝓂𝑒𝑜𝓃𝑒 ({𝓀𝒾𝓁𝓁_𝒸𝑜𝓈𝓉})
+/𝓇𝑜𝒷 @𝓊𝓈𝑒𝓇 - 𝑅𝑜𝒷 𝓈𝑜𝓂𝑒𝑜𝓃𝑒
+/𝓇𝑒𝓋𝒾𝓋𝑒 @𝓊𝓈𝑒𝓇 - 𝐵𝓇𝒾𝓃𝑔 𝒷𝒶𝒸𝓀 𝓉𝑜 𝓁𝒾𝒻𝑒 ({𝓇𝑒𝓋𝒾𝓋𝑒_𝒸𝑜𝓈𝓉})
+/𝓅𝓇𝑜𝓉𝑒𝒸𝓉 𝒹𝒶𝓎𝓈 - 𝐵𝓊𝓎 𝓅𝓇𝑜𝓉𝑒𝒸𝓉𝒾𝑜𝓃
+
+*🎯 𝐹𝓊𝓃 𝒞𝑜𝓂𝓂𝒶𝓃𝒹𝓈:*
+/𝓁𝑜𝑜𝓀 @𝓊𝓈𝑒𝓇 - 𝑅𝒶𝓉𝑒 𝒶𝓅𝓅𝑒𝒶𝓇𝒶𝓃𝒸𝑒
+/𝒷𝓇𝒶𝒾𝓃 @𝓊𝓈𝑒𝓇 - 𝑅𝒶𝓉𝑒 𝐼𝒬
+/𝒸𝑜𝓊𝓅𝓁𝑒𝓈 - 𝒮𝑒𝑒 𝓉𝑜𝒹𝒶𝓎'𝓈 𝓇𝑜𝓂𝒶𝓃𝓉𝒾𝒸 𝓅𝒶𝒾𝓇
+
+𝒩𝑒𝓍𝓉: 𝒮𝑜𝒸𝒾𝒶𝓁 𝒻𝑒𝒶𝓉𝓊𝓇𝑒𝓈 ➡️
+            """.format(
+                𝓀𝒾𝓁𝓁_𝒸𝑜𝓈𝓉=format_money(db.get_bot_setting('kill_cost', 500)),
+                𝓇𝑒𝓋𝒾𝓋𝑒_𝒸𝑜𝓈𝓉=format_money(db.get_bot_setting('revive_cost', 1000))
+            ),
+            
+            4: """
+📘 *𝒮𝑜𝒸𝒾𝒶𝓁 𝐹𝑒𝒶𝓉𝓊𝓇𝑒𝓈 - 𝒫𝒶𝑔𝑒 4/5* 📘
+
+*👥 𝒰𝓈𝑒𝓇 𝐼𝓃𝓉𝑒𝓇𝒶𝒸𝓉𝒾𝑜𝓃𝓈:*
+/𝓅𝓇𝑜𝒻𝒾𝓁𝑒 @𝓊𝓈𝑒𝓇 - 𝒱𝒾𝑒𝓌 𝓊𝓈𝑒𝓇 𝓅𝓇𝑜𝒻𝒾𝓁𝑒
+/𝒹𝑒𝓉𝒶𝒾𝓁𝓈 @𝓊𝓈𝑒𝓇 - 𝒮𝑒𝑒 𝓃𝒶𝓂𝑒 𝒽𝒾𝓈𝓉𝑜𝓇𝓎
+/𝓉𝑜𝓅 - 𝒯𝑜𝓅 10 𝓇𝒾𝒸𝒽𝑒𝓈𝓉 𝓊𝓈𝑒𝓇𝓈
+/𝑔𝒾𝓋𝑒 @𝓊𝓈𝑒𝓇 𝒶𝓂𝑜𝓊𝓃𝓉 - 𝒯𝓇𝒶𝓃𝓈𝒻𝑒𝓇 𝓂𝑜𝓃𝑒𝓎
+
+*🛍️ 𝐼𝓉𝑒𝓂𝒾𝓏𝒶𝓉𝒾𝑜𝓃:*
+/𝒾𝓉𝑒𝓂𝓈 - 𝒱𝒾𝑒𝓌 𝓈𝒽𝑜𝓅
+/𝒷𝓊𝓎 𝒾𝓉𝑒𝓂_𝒾𝒹 - 𝒫𝓊𝓇𝒸𝒽𝒶𝓈𝑒 𝒾𝓉𝑒𝓂
+/𝑔𝒾𝒻𝓉 @𝓊𝓈𝑒𝓇 𝒾𝓉𝑒𝓂 - 𝒢𝒾𝒻𝓉 𝒶𝓃 𝒾𝓉𝑒𝓂
+/𝓂𝓎𝒾𝓉𝑒𝓂𝓈 - 𝒱𝒾𝑒𝓌 𝓎𝑜𝓊𝓇 𝒾𝓃𝓋𝑒𝓃𝓉𝑜𝓇𝓎
+
+*🤖 𝒜𝐼 𝒞𝒽𝒶𝓉:*
+𝒥𝓊𝓈𝓉 𝓉𝒶𝓁𝓀 𝓉𝑜 𝓂𝑒! 𝐼'𝓁𝓁 𝓇𝑒𝓈𝓅𝑜𝓃𝒹.
+𝐼𝓃 𝑔𝓇𝑜𝓊𝓅𝓈: 𝓂𝑒𝓃𝓉𝒾𝑜𝓃 𝓂𝑒 @𝒮𝒽𝒾𝓏𝓊𝓀𝒶
+
+𝒩𝑒𝓍𝓉: 𝒜𝒹𝓂𝒾𝓃𝒾𝓈𝓉𝓇𝒶𝓉𝒾𝑜𝓃 ➡️
+            """,
+            
+            5: """
+📘 *𝒜𝒹𝓂𝒾𝓃𝒾𝓈𝓉𝓇𝒶𝓉𝒾𝑜𝓃 - 𝒫𝒶𝑔𝑒 5/5* 📘
+
+*🛡️ 𝒢𝓇𝑜𝓊𝓅 𝒜𝒹𝓂𝒾𝓃𝓈:*
+/𝓌𝒶𝓇𝓃 @𝓊𝓈𝑒𝓇 𝓇𝑒𝒶𝓈𝑜𝓃 - 𝒲𝒶𝓇𝓃 𝒶 𝓊𝓈𝑒𝓇
+/𝓂𝓊𝓉𝑒 @𝓊𝓈𝑒𝓇 𝓂𝒾𝓃𝓊𝓉𝑒𝓈 - 𝑀𝓊𝓉𝑒 𝒶 𝓊𝓈𝑒𝓇
+/𝓀𝒾𝒸𝓀 @𝓊𝓈𝑒𝓇 - 𝒦𝒾𝒸𝓀 𝒶 𝓊𝓈𝑒𝓇
+/𝒷𝒶𝓃 @𝓊𝓈𝑒𝓇 - 𝐵𝒶𝓃 𝒶 𝓊𝓈𝑒𝓇
+/𝓊𝓃𝒷𝒶𝓃 @𝓊𝓈𝑒𝓇 - 𝒰𝓃𝒷𝒶𝓃 𝒶 𝓊𝓈𝑒𝓇
+/𝓊𝓃𝓂𝓊𝓉𝑒 @𝓊𝓈𝑒𝓇 - 𝒰𝓃𝓂𝓊𝓉𝑒 𝒶 𝓊𝓈𝑒𝓇
+
+*👑 𝐵𝑜𝓉 𝒪𝓌𝓃𝑒𝓇:*
+/𝑜𝓌𝓃𝑒𝓇𝒽𝑒𝓁𝓅 - 𝒪𝓌𝓃𝑒𝓇 𝒸𝑜𝓂𝓂𝒶𝓃𝒹𝓈
+/𝓅𝓇𝒾𝒸𝑒 - 𝑀𝒶𝓃𝒶𝑔𝑒 𝒶𝓁𝓁 𝓅𝓇𝒾𝒸𝑒𝓈
+/𝑒𝓍𝓅𝑜𝓇𝓉 - 𝐸𝓍𝓅𝑜𝓇𝓉 𝒶𝓁𝓁 𝒹𝒶𝓉𝒶
+/𝒾𝓂𝓅𝑜𝓇𝓉 - 𝐼𝓂𝓅𝑜𝓇𝓉 𝒹𝒶𝓉𝒶
+/𝒷𝓇𝑜𝒶𝒹𝒸𝒶𝓈𝓉 - 𝒮𝑒𝓃𝒹 𝓂𝑒𝓈𝓈𝒶𝑔𝑒 𝓉𝑜 𝒶𝓁𝓁
+
+*🔧 𝒮𝓊𝓅𝓅𝑜𝓇𝓉:*
+/𝒽𝑒𝓁𝓅 - 𝒬𝓊𝒾𝒸𝓀 𝒽𝑒𝓁𝓅
+/𝒷𝑜𝑜𝓀 - 𝒯𝒽𝒾𝓈 𝒽𝑒𝓁𝓅 𝑏𝑜𝑜𝓀
+𝒞𝑜𝓃𝓉𝒶𝒸𝓉: @𝑜𝓌𝓃𝑒𝓇_𝓊𝓈𝑒𝓇𝓃𝒶𝓂𝑒
+
+🌸 *𝒯𝒽𝒶𝓃𝓀 𝓎𝑜𝓊 𝒻𝑜𝓇 𝓊𝓈𝒾𝓃𝑔 𝒮𝒽𝒾𝓏𝓊𝓀𝒶!* 🌸
+            """
+        }
+        
+        total_pages = 5
+        if page > total_pages:
+            page = total_pages
+        
+        keyboard = []
+        if total_pages > 1:
+            keyboard.append([
+                InlineKeyboardButton("⬅️ 𝒫𝓇𝑒𝓋", callback_data=f"book_{page-1}"),
+                InlineKeyboardButton(f"📄 {page}/{total_pages}", callback_data="book_current"),
+                InlineKeyboardButton("𝒩𝑒𝓍𝓉 ➡️", callback_data=f"book_{page+1}")
+            ])
+        
+        keyboard.extend([
+            [
+                InlineKeyboardButton("🎮 𝒬𝓊𝒾𝒸𝓀 𝒮𝓉𝒶𝓇𝓉", callback_data="quick_start"),
+                InlineKeyboardButton("💰 𝐸𝒸𝑜𝓃𝑜𝓂𝓎 𝐺𝓊𝒾𝒹𝑒", callback_data="economy_guide")
+            ],
+            [
+                InlineKeyboardButton("🛡️ 𝒜𝒹𝓂𝒾𝓃 𝐺𝓊𝒾𝒹𝑒", callback_data="admin_guide"),
+                InlineKeyboardButton("🔙 𝑀𝒶𝒾𝓃 𝑀𝑒𝓃𝓊", callback_data="back_main")
+            ]
+        ])
+        
+        await update.message.reply_text(
+            pages[page],
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        logging.error(f"Book command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓁𝑜𝒶𝒹𝒾𝓃𝑔 𝒽𝑒𝓁𝓅 𝒷𝑜𝑜𝓀!* ❌")
+
+# ========== MESSAGE REACTION SYSTEM ==========
+async def message_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """React to messages based on content"""
+    try:
+        # Skip if it's a command or bot message
+        if update.message.text and update.message.text.startswith('/'):
+            return
+        
+        if update.message.from_user and update.message.from_user.is_bot:
+            return
+        
+        # Random chance to react
+        reaction_chance = db.get_bot_setting('reaction_chance', 30)
+        if random.randint(1, 100) > reaction_chance:
+            return
+        
+        message_text = update.message.text or update.message.caption or ""
+        message_text_lower = message_text.lower()
+        
+        # Good keywords
+        good_keywords = ['love', 'thank', 'thanks', 'good', 'nice', 'great', 'awesome', 
+                        'beautiful', 'wonderful', 'amazing', 'perfect', 'happy', 'joy',
+                        'shizuka', 'bot', 'helpful', 'kind', 'sweet', 'cute']
+        
+        # Bad keywords
+        bad_keywords = ['hate', 'stupid', 'idiot', 'dumb', 'bad', 'worst', 'ugly',
+                       'annoying', 'boring', 'useless', 'delete', 'remove', 'kill',
+                       'die', 'death', 'attack']
+        
+        # Check for good messages
+        good_match = any(keyword in message_text_lower for keyword in good_keywords)
+        
+        # Check for bad messages
+        bad_match = any(keyword in message_text_lower for keyword in bad_keywords)
+        
+        if good_match:
+            try:
+                await update.message.react(db.get_bot_setting('reaction_good', '❤️'))
+            except:
+                pass
+        
+        elif bad_match:
+            try:
+                await update.message.react(db.get_bot_setting('reaction_bad', '👎'))
+            except:
+                pass
+        
+        # Special: Pin good messages from owner
+        if is_owner(update.effective_user.id) and good_match:
+            try:
+                await update.message.pin()
+                
+                # Store in database
+                db.add_pinned_message(
+                    update.effective_chat.id,
+                    update.message.message_id,
+                    update.effective_user.id,
+                    message_text[:100]
+                )
+            except Exception as e:
+                logging.error(f"Pin error: {e}")
+                
+    except Exception as e:
+        logging.error(f"Message reaction error: {e}")
+
+# ========== ENHANCED COMMAND HANDLERS ==========
+async def look_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rate someone's look"""
+    try:
+        target_user = await get_user_from_input(update, context)
+        
+        if not target_user:
+            await update.message.reply_text(
+                "👀 *𝒰𝓈𝒶𝑔𝑒:* /look @username\n"
+                "👀 *𝒪𝓇 𝓇𝑒𝓅𝓁𝓎 𝓉𝑜 𝓈𝑜𝓂𝑒𝑜𝓃𝑒'𝓈 𝓂𝑒𝓈𝓈𝒶𝑔𝑒 𝓌𝒾𝓉𝒽* /look",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Check if rating bot
+        if target_user['id'] == context.bot.id:
+            rating = "♾️"
+            comment = "𝒮𝒽𝒾𝓏𝓊𝓀𝒶 𝒾𝓈 𝒶𝓁𝓌𝒶𝓎𝓈 𝓅𝑒𝓇𝒻𝑒𝒸𝓉! 🌸"
+        else:
+            rating = random.randint(1, 100)
+            
+            comments = {
+                95: "𝒢𝑜𝒹𝓁𝒾𝓀𝑒 𝒷𝑒𝒶𝓊𝓉𝓎! ✨",
+                85: "𝒮𝓉𝓊𝓃𝓃𝒾𝓃𝑔! 💫",
+                75: "𝒱𝑒𝓇𝓎 𝒶𝓉𝓉𝓇𝒶𝒸𝓉𝒾𝓋𝑒! 🌟",
+                60: "𝒞𝓊𝓉𝑒! 💖",
+                40: "𝒩𝑜𝓉 𝒷𝒶𝒹! 😊",
+                20: "𝒯𝓇𝓎 𝒽𝒶𝓇𝒹𝑒𝓇! 🌼",
+                1: "𝒪𝒽... 🍃"
+            }
+            
+            comment = "𝒫𝓇𝑒𝓉𝓉𝓎! 🌸"
+            for threshold, msg in sorted(comments.items(), reverse=True):
+                if rating >= threshold:
+                    comment = msg
+                    break
+        
+        await update.message.reply_text(
+            f"""
+👁️‍🗨️ *𝗟𝗢𝗢𝗞 𝗥𝗔𝗧𝗜𝗡𝗚* 👁️‍🗨️
+
+👤 *𝒰𝓈𝑒𝓇:* {target_user['name']}
+⭐ *𝑅𝒶𝓉𝒾𝓃𝑔:* {rating}/100 {'%' if isinstance(rating, int) else ''}
+
+💬 *𝒞𝑜𝓂𝓂𝑒𝓃𝓉:* {comment}
+
+🌸 *𝑅𝑒𝓂𝑒𝓂𝒷𝑒𝓇, 𝓉𝓇𝓊𝑒 𝒷𝑒𝒶𝓊𝓉𝓎 𝒸𝑜𝓂𝑒𝓈 𝒻𝓇𝑜𝓂 𝓌𝒾𝓉𝒽𝒾𝓃!* 🌸
+            """,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Store rating
+        if isinstance(rating, int):
+            db.update_user(target_user['id'], {'look_rating': rating})
+            
+    except Exception as e:
+        logging.error(f"Look command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝒸𝒶𝓁𝒸𝓊𝓁𝒶𝓉𝒾𝓃𝑔 𝓁𝑜𝑜𝓀 𝓇𝒶𝓉𝒾𝓃𝑔!* ❌")
+
+async def brain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rate someone's IQ"""
+    try:
+        target_user = await get_user_from_input(update, context)
+        
+        if not target_user:
+            await update.message.reply_text(
+                "🧠 *𝒰𝓈𝒶𝑔𝑒:* /brain @username\n"
+                "🧠 *𝒪𝓇 𝓇𝑒𝓅𝓁𝓎 𝓉𝑜 𝓈𝑜𝓂𝑒𝑜𝓃𝑒'𝓈 𝓂𝑒𝓈𝓈𝒶𝑔𝑒 𝓌𝒾𝓉𝒽* /brain",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Check if rating bot
+        if target_user['id'] == context.bot.id:
+            rating = "♾️"
+            comment = "𝒜𝐼 𝓂𝒾𝓃𝒹 𝒷𝑒𝓎𝑜𝓃𝒹 𝓂𝑒𝒶𝓈𝓊𝓇𝑒! 🤖"
+        else:
+            rating = random.randint(1, 100)
+            
+            comments = {
+                95: "𝒢𝑒𝓃𝒾𝓊𝓈 𝓁𝑒𝓋𝑒𝓁! 🧩",
+                85: "𝒱𝑒𝓇𝓎 𝒷𝓇𝒾𝑔𝒽𝓉! 💡",
+                75: "𝒮𝓂𝒶𝓇𝓉! 🎓",
+                60: "𝒜𝒷𝑜𝓋𝑒 𝒶𝓋𝑒𝓇𝒶𝑔𝑒! 📚",
+                40: "𝒜𝓋𝑒𝓇𝒶𝑔𝑒! 📖",
+                20: "𝒦𝑒𝑒𝓅 𝓁𝑒𝒶𝓇𝓃𝒾𝓃𝑔! 📝",
+                1: "𝒪𝒽 𝒹𝑒𝒶𝓇... 🍂"
+            }
+            
+            comment = "𝒩𝑜𝓉 𝒷𝒶𝒹! 📘"
+            for threshold, msg in sorted(comments.items(), reverse=True):
+                if rating >= threshold:
+                    comment = msg
+                    break
+        
+        await update.message.reply_text(
+            f"""
+🧠 *𝗜𝗤 𝗥𝗔𝗧𝗜𝗡𝗚* 🧠
+
+👤 *𝒰𝓈𝑒𝓇:* {target_user['name']}
+🧮 *𝐼𝒬 𝒮𝒸𝑜𝓇𝑒:* {rating}/100 {'%' if isinstance(rating, int) else ''}
+
+💭 *𝒞𝑜𝓂𝓂𝑒𝓃𝓉:* {comment}
+
+🌟 *𝐼𝓃𝓉𝑒𝓁𝓁𝒾𝑔𝑒𝓃𝒸𝑒 𝒾𝓈 𝓃𝑜𝓉 𝒻𝒾𝓍𝑒𝒹, 𝒾𝓉 𝒸𝒶𝓃 𝒶𝓁𝓌𝒶𝓎𝓈 𝑔𝓇𝑜𝓌!* 🌟
+            """,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Store rating
+        if isinstance(rating, int):
+            db.update_user(target_user['id'], {'brain_rating': rating})
+            
+    except Exception as e:
+        logging.error(f"Brain command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝒸𝒶𝓁𝒸𝓊𝓁𝒶𝓉𝒾𝓃𝑔 𝐼𝒬 𝓇𝒶𝓉𝒾𝓃𝑔!* ❌")
+
+async def give_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transfer money to another user"""
+    try:
+        if not context.args or len(context.args) < 2:
+            await update.message.reply_text(
+                "💸 *𝒰𝓈𝒶𝑔𝑒:* /give @username amount\n"
+                "*𝐸𝓍𝒶𝓂𝓅𝓁𝑒:* /give @shizuka 100\n\n"
+                "𝒴𝑜𝓊 𝒸𝒶𝓃 𝒶𝓁𝓈𝑜 𝓊𝓈𝑒:\n"
+                "/give 123456789 100 (𝓊𝓈𝑒𝓇 𝐼𝒟)\n"
+                "𝒪𝓇 𝓇𝑒𝓅𝓁𝓎 𝓉𝑜 𝓂𝑒𝓈𝓈𝒶𝑔𝑒: /give 100",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        sender = update.effective_user
+        
+        # Get target user
+        target_user = await get_user_from_input(update, context)
+        if not target_user:
+            # Try to parse as user ID
+            try:
+                target_id = int(context.args[0])
+                user_data = db.get_user(target_id)
+                if user_data:
+                    target_user = {
+                        'id': target_id,
+                        'name': user_data.get('first_name', f'User {target_id}'),
+                        'username': user_data.get('username')
+                    }
+                else:
+                    await update.message.reply_text("❌ *𝒰𝓈𝑒𝓇 𝓃𝑜𝓉 𝒻𝑜𝓊𝓃𝒹!* ❌")
+                    return
+            except:
+                await update.message.reply_text("❌ *𝒰𝓈𝑒𝓇 𝓃𝑜𝓉 𝒻𝑜𝓊𝓃𝒹!* ❌")
+                return
+        
+        # Parse amount (check if amount is first arg if replying)
+        if update.message.reply_to_message:
+            amount_str = context.args[0]
+        else:
+            amount_str = context.args[1] if len(context.args) > 1 else context.args[0]
+        
+        try:
+            amount = int(amount_str)
+            if amount <= 0:
+                await update.message.reply_text("❌ *𝒜𝓂𝑜𝓊𝓃𝓉 𝓂𝓊𝓈𝓉 𝒷𝑒 𝓅𝑜𝓈𝒾𝓉𝒾𝓋𝑒!* ❌")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ *𝐼𝓃𝓋𝒶𝓁𝒾𝒹 𝒶𝓂𝑜𝓊𝓃𝓉!* ❌")
+            return
+        
+        # Check if sending to self
+        if target_user['id'] == sender.id:
+            await update.message.reply_text("🤨 *𝒴𝑜𝓊 𝒸𝒶𝓃'𝓉 𝓈𝑒𝓃𝒹 𝓂𝑜𝓃𝑒𝓎 𝓉𝑜 𝓎𝑜𝓊𝓇𝓈𝑒𝓁𝒻!*")
+            return
+        
+        # Check sender balance
+        sender_data = db.get_user(sender.id)
+        if sender_data['cash'] < amount:
+            await update.message.reply_text(
+                f"💸 *𝐼𝓃𝓈𝓊𝒻𝒻𝒾𝒸𝒾𝑒𝓃𝓉 𝒻𝓊𝓃𝒹𝓈!*\n\n"
+                f"𝒴𝑜𝓊 𝓃𝑒𝑒𝒹: {format_money(amount)}\n"
+                f"𝒴𝑜𝓊 𝒽𝒶𝓋𝑒: {format_money(sender_data['cash'])}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Transfer money
+        if db.transfer_cash(sender.id, target_user['id'], amount, f"Gift to {target_user['name']}"):
+            sender_new = db.get_user(sender.id)
+            receiver_new = db.get_user(target_user['id'])
+            
+            success_text = f"""
+✅ *𝒯𝓇𝒶𝓃𝓈𝒻𝑒𝓇 𝒮𝓊𝒸𝒸𝑒𝓈𝓈𝒻𝓊𝓁!* ✅
+
+💰 *𝒜𝓂𝑜𝓊𝓃𝓉:* {format_money(amount)}
+👤 *𝒯𝑜:* {target_user['name']}
+💖 *𝑀𝑒𝓈𝓈𝒶𝑔𝑒:* 𝒮𝒽𝒶𝓇𝒾𝓃𝑔 𝒾𝓈 𝒸𝒶𝓇𝒾𝓃𝑔!
+
+*𝒩𝑒𝓌 𝐵𝒶𝓁𝒶𝓃𝒸𝑒𝓈:*
+💵 𝒴𝑜𝓊𝓇 𝒸𝒶𝓈𝒽: {format_money(sender_new['cash'])}
+💵 𝒯𝒽𝑒𝒾𝓇 𝒸𝒶𝓈𝒽: {format_money(receiver_new['cash'])}
+            """
+            
+            # Try to notify receiver
+            try:
+                await context.bot.send_message(
+                    target_user['id'],
+                    f"💝 *𝒴𝑜𝓊 𝓇𝑒𝒸𝑒𝒾𝓋𝑒𝒹 𝒶 𝑔𝒾𝒻𝓉!*\n\n"
+                    f"💰 𝒜𝓂𝑜𝓊𝓃𝓉: {format_money(amount)}\n"
+                    f"👤 𝐹𝓇𝑜𝓂: {sender.first_name}\n"
+                    f"💖 𝑀𝑒𝓈𝓈𝒶𝑔𝑒: 𝐸𝓃𝒿𝑜𝓎 𝓉𝒽𝑒 𝑔𝒾𝒻𝓉!",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass  # User might have blocked bot
+            
+            await update.message.reply_text(
+                success_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text("❌ *𝒯𝓇𝒶𝓃𝓈𝒻𝑒𝓇 𝒻𝒶𝒾𝓁𝑒𝒹!* ❌")
+    except Exception as e:
+        logging.error(f"Give command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓉𝓇𝒶𝓃𝓈𝒻𝑒𝓇𝓇𝒾𝓃𝑔 𝓂𝑜𝓃𝑒𝓎!* ❌")
+
+# ========== ENHANCED KILL COMMAND ==========
+async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kill another user with success rate"""
+    try:
+        if update.effective_chat.type == "private":
+            await update.message.reply_text(
+                "💖 *𝒯𝒽𝒾𝓈 𝑔𝒶𝓂𝑒 𝓃𝑒𝑒𝒹𝓈 𝒻𝓇𝒾𝑒𝓃𝒹𝓈 𝓉𝑜 𝓅𝓁𝒶𝓎!*\n"
+                "𝒥𝑜𝒾𝓃 𝒶 𝑔𝓇𝑜𝓊𝓅 𝒶𝓃𝒹 𝒾𝓃𝓋𝒾𝓉𝑒 𝓂𝑒 𝓉𝑜 𝓅𝓁𝒶𝓎 𝓉𝑜𝑔𝑒𝓉𝒽𝑒𝓇! 👥",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        target_user = await get_user_from_input(update, context)
+        if not target_user:
+            await update.message.reply_text(
+                "🔪 *𝒰𝓈𝒶𝑔𝑒:* /kill @username\n"
+                f"💸 *𝒞𝑜𝓈𝓉:* {format_money(db.get_bot_setting('kill_cost', 500))}\n"
+                f"🎯 *𝒮𝓊𝒸𝒸𝑒𝓈𝓈:* {db.get_bot_setting('kill_success_rate', 50)}% 𝒸𝒽𝒶𝓃𝒸𝑒\n"
+                "⚠️ *𝐹𝒶𝒾𝓁𝑒𝒹:* 30 𝓂𝒾𝓃𝓊𝓉𝑒 𝒸𝑜𝑜𝓁𝒹𝑜𝓌𝓃!\n"
+                "💀 *𝒟𝑒𝒶𝓉𝒽:* 5 𝒽𝑜𝓊𝓇𝓈 𝒾𝒻 𝓈𝓊𝒸𝒸𝑒𝓈𝓈𝒻𝓊𝓁",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        killer = update.effective_user
+        
+        if target_user['id'] == killer.id:
+            await update.message.reply_text("💔 *𝒟𝑜𝓃'𝓉 𝒽𝒶𝓇𝓂 𝓎𝑜𝓊𝓇𝓈𝑒𝓁𝒻!* 𝒴𝑜𝓊'𝓇𝑒 𝓉𝑜𝑜 𝓅𝓇𝑒𝒸𝒾𝑜𝓊𝓈! 💖")
+            return
+        
+        # Get killer data
+        killer_data = db.get_user(killer.id)
+        
+        # Check if killer is dead
+        if killer_data['revive_until']:
+            try:
+                revive_time = datetime.fromisoformat(killer_data['revive_until'])
+                if revive_time > datetime.now():
+                    time_left = revive_time - datetime.now()
+                    hours = time_left.seconds // 3600
+                    minutes = (time_left.seconds % 3600) // 60
+                    
+                    await update.message.reply_text(
+                        f"👻 *𝒴𝑜𝓊'𝓇𝑒 𝒹𝑒𝒶𝒹!* 👻\n\n"
+                        f"𝒴𝑜𝓊 𝒸𝒶𝓃 𝓇𝑒𝓋𝒾𝓋𝑒 𝒾𝓃: *{hours}𝒽 {minutes}𝓂*\n"
+                        f"💖 𝒜𝓈𝓀 𝒻𝓇𝒾𝑒𝓃𝒹𝓈 𝓉𝑜 /revive 𝓎𝑜𝓊!",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return
+            except:
+                pass
+        
+        # Check if killer is in jail
+        if killer_data['jail_until']:
+            try:
+                jail_time = datetime.fromisoformat(killer_data['jail_until'])
+                if jail_time > datetime.now():
+                    time_left = jail_time - datetime.now()
+                    hours = time_left.seconds // 3600
+                    
+                    await update.message.reply_text(
+                        f"⛓️ *𝒴𝑜𝓊'𝓇𝑒 𝒾𝓃 𝒿𝒶𝒾𝓁!* ⛓️\n\n"
+                        f"𝑅𝑒𝓁𝑒𝒶𝓈𝑒 𝒾𝓃: *{hours} 𝒽𝑜𝓊𝓇𝓈*\n"
+                        f"😔 𝐵𝑒 𝑔𝑜𝑜𝒹 𝓃𝑒𝓍𝓉 𝓉𝒾𝓂𝑒!",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return
+            except:
+                pass
+        
+        # Check kill cooldown
+        if killer_data['kill_cooldown_until']:
+            try:
+                cooldown_time = datetime.fromisoformat(killer_data['kill_cooldown_until'])
+                if cooldown_time > datetime.now():
+                    time_left = cooldown_time - datetime.now()
+                    minutes = time_left.seconds // 60
+                    seconds = time_left.seconds % 60
+                    
+                    await update.message.reply_text(
+                        f"⏳ *𝒦𝒾𝓁𝓁 𝒸𝑜𝓂𝓂𝒶𝓃𝒹 𝑜𝓃 𝒸𝑜𝑜𝓁𝒹𝑜𝓌𝓃!*\n\n"
+                        f"𝒲𝒶𝒾𝓉: *{minutes}𝓂 {seconds}𝓈*\n"
+                        f"💤 𝑅𝑒𝓈𝓉 𝒷𝑒𝒻𝑜𝓇𝑒 𝓎𝑜𝓊𝓇 𝓃𝑒𝓍𝓉 𝒶𝓉𝓉𝑒𝓂𝓅𝓉!",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return
+            except:
+                pass
+        
+        kill_cost = db.get_bot_setting('kill_cost', 500)
+        
+        # Check if enough money
+        if killer_data['cash'] < kill_cost:
+            await update.message.reply_text(
+                f"💸 *𝐼𝓃𝓈𝓊𝒻𝒻𝒾𝒸𝒾𝑒𝓃𝓉 𝒻𝓊𝓃𝒹𝓈!*\n\n"
+                f"𝒴𝑜𝓊 𝓃𝑒𝑒𝒹 {format_money(kill_cost)} 𝓉𝑜 𝒶𝓉𝓉𝑒𝓂𝓅𝓉 𝒶 𝓀𝒾𝓁𝓁.\n"
+                f"💰 𝒰𝓈𝑒 /work 𝑜𝓇 /daily 𝓉𝑜 𝑒𝒶𝓇𝓃 𝓂𝑜𝓇𝑒!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        victim_data = db.get_user(target_user['id'])
+        
+        # Check if victim is protected
+        if victim_data['protection_until']:
+            try:
+                protect_until = datetime.fromisoformat(victim_data['protection_until'])
+                if protect_until > datetime.now():
+                    # Attacker loses 100 money, victim gains it
+                    penalty = 100
+                    
+                    if db.deduct_cash(killer.id, penalty, "Failed kill (protected target)"):
+                        db.add_cash(target_user['id'], penalty, "Protection reward")
+                        
+                        # Log protection attempt
+                        with db.get_connection() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute('''
+                            INSERT INTO protection_log (attacker_id, protected_id, amount_lost)
+                            VALUES (?, ?, ?)
+                            ''', (killer.id, target_user['id'], penalty))
+                            conn.commit()
+                        
+                        await update.message.reply_text(
+                            f"🛡️ *𝒫𝓇𝑜𝓉𝑒𝒸𝓉𝑒𝒹 𝒯𝒶𝓇𝑔𝑒𝓉!* 🛡️\n\n"
+                            f"{target_user['name']} 𝒾𝓈 𝓅𝓇𝑜𝓉𝑒𝒸𝓉𝑒𝒹!\n"
+                            f"💸 𝒴𝑜𝓊 𝓁𝑜𝓈𝓉 {format_money(penalty)} "
+                            f"(𝓉𝓇𝒶𝓃𝓈𝒻𝑒𝓇𝓇𝑒𝒹 𝓉𝑜 {target_user['name']})\n\n"
+                            f"*𝐵𝓊𝓎 𝓅𝓇𝑜𝓉𝑒𝒸𝓉𝒾𝑜𝓃 𝓌𝒾𝓉𝒽* /protect",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                        return
+            except:
+                pass
+        
+        # Deduct kill cost
+        db.deduct_cash(killer.id, kill_cost, "Kill attempt")
+        
+        # Success chance
+        success_rate = db.get_bot_setting('kill_success_rate', 50) / 100
+        success = random.random() < success_rate
+        
+        killer_info = await get_user_info(context, killer.id)
+        victim_info = await get_user_info(context, target_user['id'])
+        
+        if success:
+            # Successful kill - victim dies for 5 hours
+            db.update_user(target_user['id'], {
+                'revive_until': (datetime.now() + timedelta(hours=5)).isoformat(),
+                'deaths': victim_data['deaths'] + 1
+            })
+            
+            db.update_user(killer.id, {
+                'kills': killer_data['kills'] + 1,
+                'last_kill_time': datetime.now().isoformat()
+            })
+            
+            # Log kill
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                INSERT INTO kill_log (killer_id, victim_id, kill_time, method, success)
+                VALUES (?, ?, ?, 'direct', 1)
+                ''', (killer.id, target_user['id'], datetime.now().isoformat()))
+                conn.commit()
+            
+            success_messages = [
+                f"🔪 *𝒜𝒮𝒮𝒜𝒮𝒮𝒩𝒜𝒯ℐ𝒪𝒩!* {killer_info['mention']} 𝑒𝓁𝒾𝓂𝒾𝓃𝒶𝓉𝑒𝒹 {victim_info['mention']}!",
+                f"💀 *𝐵𝑅𝒰𝒯𝒜𝐿!* {victim_info['mention']} 𝓌𝒶𝓈 𝓉𝒶𝓀𝑒𝓃 𝑜𝓊𝓉 𝒷𝓎 {killer_info['mention']}!",
+                f"⚰️ *𝑅𝐼𝒫!* {victim_info['mention']} 𝒻𝑒𝓁𝓁 𝓉𝑜 {killer_info['mention']}'𝓈 𝒶𝓉𝓉𝒶𝒸𝓀!",
+                f"🎯 *𝒫𝑅𝐸𝒞𝐼𝒮ℐ𝒪𝒩 𝒮𝒯𝑅𝐼𝒦𝐸!* {killer_info['mention']} 𝓉𝑜𝑜𝓀 𝒹𝑜𝓌𝓃 {victim_info['mention']}!"
+            ]
+            
+            message = random.choice(success_messages)
+            message += f"\n\n⏳ *𝑅𝑒𝓋𝒾𝓋𝑒 𝒾𝓃:* 5 𝒽𝑜𝓊𝓇𝓈\n💖 𝒰𝓈𝑒 /revive {target_user['name']} 𝓉𝑜 𝒷𝓇𝒾𝓃𝑔 𝓉𝒽𝑒𝓂 𝒷𝒶𝒸𝓀!"
+            
+        else:
+            # Failed kill - 30 minute cooldown
+            cooldown_minutes = db.get_bot_setting('kill_fail_cooldown', 30)
+            db.update_user(killer.id, {
+                'kill_cooldown_until': (datetime.now() + timedelta(minutes=cooldown_minutes)).isoformat(),
+                'last_kill_time': datetime.now().isoformat()
+            })
+            
+            fail_messages = [
+                f"😅 *𝑀𝐼𝒮𝒮𝐸𝒟!* {killer_info['mention']} 𝒻𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝓀𝒾𝓁𝓁 {victim_info['mention']}!",
+                f"🤦 *𝐹𝒜ℐ𝐿𝐸𝒟!* {killer_info['mention']}'𝓈 𝒶𝓉𝓉𝑒𝓂𝓅𝓉 𝓌𝒶𝓈 𝓅𝒶𝓉𝒽𝑒𝓉𝒾𝒸!",
+                f"💨 *𝐸𝒮𝒞𝒜𝒫𝐸𝒟!* {victim_info['mention']} 𝒹𝑜𝒹𝑔𝑒𝒹 {killer_info['mention']}'𝓈 𝒶𝓉𝓉𝒶𝒸𝓀!"
+            ]
+            
+            message = random.choice(fail_messages)
+            message += f"\n\n⏳ *𝒦𝒾𝓁𝓁 𝒸𝑜𝓂𝓂𝒶𝓃𝒹 𝓁𝑜𝒸𝓀𝑒𝒹 𝒻𝑜𝓇 {cooldown_minutes} 𝓂𝒾𝓃𝓊𝓉𝑒𝓈!*"
+            message += f"\n💸 *𝐿𝑜𝓈𝓉:* {format_money(kill_cost)}"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(f"💖 𝑅𝑒𝓋𝒾𝓋𝑒 {target_user['name']}", callback_data=f"revive_{target_user['id']}"),
+                InlineKeyboardButton("🎮 𝑀𝑜𝓇𝑒 𝒢𝒶𝓂𝑒𝓈", callback_data="play_games")
+            ]
+        ]
+        
+        await update.message.reply_text(
+            message,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logging.error(f"Kill command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝒶𝓉𝓉𝑒𝓂𝓅𝓉𝒾𝓃𝑔 𝓀𝒾𝓁𝓁!* ❌")
+
+# ========== ENHANCED REVIVE COMMAND ==========
+async def revive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Revive a dead user"""
+    try:
+        target_user = await get_user_from_input(update, context)
+        if not target_user:
+            await update.message.reply_text(
+                "💖 *𝒰𝓈𝒶𝑔𝑒:* /revive @username\n"
+                f"💰 *𝒞𝑜𝓈𝓉:* {format_money(db.get_bot_setting('revive_cost', 1000))}\n"
+                "✨ *𝐸𝒻𝒻𝑒𝒸𝓉:* 𝐵𝓇𝒾𝓃𝑔𝓈 𝒷𝒶𝒸𝓀 𝓉𝑜 𝓁𝒾𝒻𝑒 𝒾𝓃𝓈𝓉𝒶𝓃𝓉𝓁𝓎!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        reviver = update.effective_user
+        
+        if target_user['id'] == reviver.id:
+            await update.message.reply_text("💝 *𝒴𝑜𝓊'𝓇𝑒 𝒶𝓁𝓇𝑒𝒶𝒹𝓎 𝒶𝓁𝒾𝓋𝑒, 𝓈𝒾𝓁𝓁𝓎!*")
+            return
+        
+        # Check if target is actually dead
+        target_data = db.get_user(target_user['id'])
+        if not target_data['revive_until']:
+            await update.message.reply_text(f"🌟 *{target_user['name']} 𝒾𝓈 𝒶𝓁𝓇𝑒𝒶𝒹𝓎 𝒶𝓁𝒾𝓋𝑒!*")
+            return
+        
+        revive_time = datetime.fromisoformat(target_data['revive_until'])
+        if revive_time < datetime.now():
+            await update.message.reply_text(f"✨ *{target_user['name']} 𝒾𝓈 𝒶𝓁𝓇𝑒𝒶𝒹𝓎 𝒶𝓁𝒾𝓋𝑒!*")
+            return
+        
+        # Check reviver's balance
+        revive_cost = db.get_bot_setting('revive_cost', 1000)
+        reviver_data = db.get_user(reviver.id)
+        
+        if reviver_data['cash'] < revive_cost:
+            await update.message.reply_text(
+                f"💸 *𝐼𝓃𝓈𝓊𝒻𝒻𝒾𝒸𝒾𝑒𝓃𝓉 𝒻𝓊𝓃𝒹𝓈!*\n\n"
+                f"𝒴𝑜𝓊 𝓃𝑒𝑒𝒹 {format_money(revive_cost)} 𝓉𝑜 𝓇𝑒𝓋𝒾𝓋𝑒 𝓈𝑜𝓂𝑒𝑜𝓃𝑒.\n"
+                f"💖 𝒯𝒽𝑒 𝒸𝑜𝓈𝓉 𝑜𝒻 𝓁𝒾𝒻𝑒 𝒾𝓈 𝓅𝓇𝑒𝒸𝒾𝑜𝓊𝓈!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Deduct money and revive
+        if db.deduct_cash(reviver.id, revive_cost, f"Revived {target_user['id']}"):
+            db.update_user(target_user['id'], {'revive_until': None})
+            
+            # Log in kill log
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                UPDATE kill_log 
+                SET revived = 1, revive_time = ?
+                WHERE victim_id = ? AND revived = 0
+                ORDER BY kill_time DESC LIMIT 1
+                ''', (datetime.now().isoformat(), target_user['id']))
+                conn.commit()
+            
+            revive_messages = [
+                f"✨ *𝑀𝐼𝑅𝒜𝒞𝐿𝐸!* {reviver.first_name} 𝓈𝓅𝑒𝓃𝓉 {format_money(revive_cost)} 𝓉𝑜 𝓇𝑒𝓋𝒾𝓋𝑒 {target_user['name']}!",
+                f"💖 *𝐿𝐼𝐹𝐸 𝒢𝐼𝒱𝐸𝑅!* {target_user['name']} 𝒾𝓈 𝒷𝒶𝒸𝓀 𝓉𝒽𝒶𝓃𝓀𝓈 𝓉𝑜 {reviver.first_name}'𝓈 𝓀𝒾𝓃𝒹𝓃𝑒𝓈𝓈!",
+                f"🌟 *𝑅𝐸𝒮𝒰𝑅𝑅𝐸𝒞𝒯𝐼𝒪𝒩!* {reviver.first_name} 𝒷𝓇𝑜𝓊𝑔𝒽𝓉 {target_user['name']} 𝒷𝒶𝒸𝓀 𝓉𝑜 𝓁𝒾𝒻𝑒!"
+            ]
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("🎮 𝒫𝓁𝒶𝓎 𝒯𝑜𝑔𝑒𝓉𝒽𝑒𝓇", callback_data="play_games"),
+                    InlineKeyboardButton("💰 𝒞𝒽𝑒𝒸𝓀 𝐵𝒶𝓁𝒶𝓃𝒸𝑒", callback_data="check_balance")
+                ]
+            ]
+            
+            # Try to notify revived user
+            try:
+                await context.bot.send_message(
+                    target_user['id'],
+                    f"🌟 *𝒴𝑜𝓊'𝓋𝑒 𝒷𝑒𝑒𝓃 𝓇𝑒𝓋𝒾𝓋𝑒𝒹!*\n\n"
+                    f"💖 𝐵𝓎: {reviver.first_name}\n"
+                    f"💰 𝒞𝑜𝓈𝓉: {format_money(revive_cost)}\n\n"
+                    f"𝒯𝒽𝒶𝓃𝓀 𝓉𝒽𝑒𝓂 𝒻𝑜𝓇 𝓉𝒽𝑒𝒾𝓇 𝓀𝒾𝓃𝒹𝓃𝑒𝓈𝓈! 🙏",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
+            
+            await update.message.reply_text(
+                random.choice(revive_messages),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await update.message.reply_text("❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝓇𝑒𝓋𝒾𝓋𝑒 𝓊𝓈𝑒𝓇!* ❌")
+    except Exception as e:
+        logging.error(f"Revive command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓇𝑒𝓋𝒾𝓋𝒾𝓃𝑔 𝓊𝓈𝑒𝓇!* ❌")
+
+# ========== ENHANCED ITEMS COMMAND ==========
+async def items_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show available items in shop"""
+    try:
+        page = 1
+        if context.args:
+            try:
+                page = int(context.args[0])
+                if page < 1:
+                    page = 1
+            except:
+                pass
+        
+        items, total_pages = db.get_items(page)
+        
+        if not items:
+            await update.message.reply_text(
+                "🛒 *𝒮𝒽𝑜𝓅 𝒾𝓈 𝑒𝓂𝓅𝓉𝓎!* 🛒\n\n"
+                "𝒜𝒹𝓂𝒾𝓃 𝒸𝒶𝓃 𝒶𝒹𝒹 𝒾𝓉𝑒𝓂𝓈 𝓌𝒾𝓉𝒽 /newitem",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        items_text = f"🛍️ *𝗦𝗛𝗢𝗣 𝗜𝗧𝗘𝗠𝗦* 🛍️ - *𝒫𝒶𝑔𝑒 {page}/{total_pages}*\n\n"
+        
+        for i, item in enumerate(items, 1):
+            items_text += f"""
+{i}. *{item['name']}* {item['emoji']}
+   💰 *𝒫𝓇𝒾𝒸𝑒:* {format_money(item['price'])}
+   📝 {item['description']}
+   🆔 *𝐼𝒟:* #{item['item_id']}
+            """
+        
+        keyboard = []
+        if total_pages > 1:
+            keyboard.append([
+                InlineKeyboardButton("⬅️ 𝒫𝓇𝑒𝓋", callback_data=f"items_{page-1}"),
+                InlineKeyboardButton(f"📄 {page}/{total_pages}", callback_data="items_current"),
+                InlineKeyboardButton("𝒩𝑒𝓍𝓉 ➡️", callback_data=f"items_{page+1}")
+            ])
+        
+        keyboard.extend([
+            [
+                InlineKeyboardButton("🛒 𝑀𝓎 𝐼𝓉𝑒𝓂𝓈", callback_data="my_items"),
+                InlineKeyboardButton("🎁 𝒢𝒾𝒻𝓉 𝐼𝓉𝑒𝓂", callback_data="gift_menu")
+            ],
+            [
+                InlineKeyboardButton("💰 𝐵𝓊𝓎 𝐼𝓉𝑒𝓂", callback_data="buy_menu"),
+                InlineKeyboardButton("🔙 𝑀𝒶𝒾𝓃 𝑀𝑒𝓃𝓊", callback_data="back_main")
+            ]
+        ])
+        
+        await update.message.reply_text(
+            items_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        logging.error(f"Items command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓁𝑜𝒶𝒹𝒾𝓃𝑔 𝓈𝒽𝑜𝓅!* ❌")
+
+# ========== OWNER ITEM MANAGEMENT ==========
+async def deleteitem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete item from shop (owner only)"""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ *𝒪𝓌𝓃𝑒𝓇 𝑜𝓃𝓁𝓎 𝒸𝑜𝓂𝓂𝒶𝓃𝒹!* ❌")
+        return
+    
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "🗑️ *𝒰𝓈𝒶𝑔𝑒:* /deleteitem item_id\n"
+                "*𝐸𝓍𝒶𝓂𝓅𝓁𝑒:* /deleteitem 1\n\n"
+                "𝒰𝓈𝑒 /items 𝓉𝑜 𝓈𝑒𝑒 𝒾𝓉𝑒𝓂 𝐼𝒟𝓈",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        try:
+            item_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ *𝐼𝓃𝓋𝒶𝓁𝒾𝒹 𝒾𝓉𝑒𝓂 𝐼𝒟!* ❌")
+            return
+        
+        item = db.get_item_by_id(item_id)
+        if not item:
+            await update.message.reply_text("❌ *𝐼𝓉𝑒𝓂 𝓃𝑜𝓉 𝒻𝑜𝓊𝓃𝒹!* ❌")
+            return
+        
+        if db.delete_item(item_id):
+            await update.message.reply_text(
+                f"""
+🗑️ *𝐼𝓉𝑒𝓂 𝒟𝑒𝓁𝑒𝓉𝑒𝒹!* 🗑️
+
+🛍️ *𝒩𝒶𝓂𝑒:* {item['name']} {item['emoji']}
+💰 *𝒫𝓇𝒾𝒸𝑒:* {format_money(item['price'])}
+📝 *𝒟𝑒𝓈𝒸𝓇𝒾𝓅𝓉𝒾𝑜𝓃:* {item['description']}
+
+✅ *𝐼𝓉𝑒𝓂 𝓇𝑒𝓂𝑜𝓋𝑒𝒹 𝒻𝓇𝑜𝓂 𝓈𝒽𝑜𝓅!*
+                """,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text("❌ *𝐹𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝒹𝑒𝓁𝑒𝓉𝑒 𝒾𝓉𝑒𝓂!* ❌")
+            
+    except Exception as e:
+        logging.error(f"Deleteitem command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝒹𝑒𝓁𝑒𝓉𝒾𝓃𝑔 𝒾𝓉𝑒𝓂!* ❌")
+
+# ========== CALLBACK HANDLER ==========
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all callback queries"""
+    try:
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        
+        # Navigation
+        if data == "back_main":
+            await start_command(update, context)
+            await query.message.delete()
+        
+        elif data.startswith("book_"):
+            try:
+                page = int(data.split("_")[1])
+                context.args = [str(page)]
+                await book_command(update, context)
+                await query.message.delete()
+            except:
+                await query.answer("❌ *𝐼𝓃𝓋𝒶𝓁𝒾𝒹 𝓅𝒶𝑔𝑒!* ❌", show_alert=True)
+        
+        elif data.startswith("items_"):
+            try:
+                page = int(data.split("_")[1])
+                context.args = [str(page)]
+                await items_command(update, context)
+                await query.message.delete()
+            except:
+                await query.answer("❌ *𝐼𝓃𝓋𝒶𝓁𝒾𝒹 𝓅𝒶𝑔𝑒!* ❌", show_alert=True)
+        
+        elif data == "price_menu":
+            await price_command(update, context)
+            await query.message.delete()
+        
+        elif data == "view_all_prices":
+            await view_prices_command(update, context)
+            await query.message.delete()
+        
+        elif data.startswith("price_"):
+            category = data.split("_")[1]
+            await query.edit_message_text(
+                f"👑 *𝐸𝒹𝒾𝓉𝒾𝓃𝑔: {category.replace('_', ' ').title()}* 👑\n\n"
+                f"𝒫𝓁𝑒𝒶𝓈𝑒 𝑒𝓃𝓉𝑒𝓇 𝓉𝒽𝑒 𝓃𝑒𝓌 𝓅𝓇𝒾𝒸𝑒:\n\n"
+                f"𝒰𝓈𝒶𝑔𝑒: /setprice {category} 𝓋𝒶𝓁𝓊𝑒",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        elif data.startswith("kill_"):
+            try:
+                user_id = int(data.split("_")[1])
+                context.args = [str(user_id)]
+                await kill_command(update, context)
+                await query.message.delete()
+            except:
+                await query.answer("❌ *𝐼𝓃𝓋𝒶𝓁𝒾𝒹 𝓊𝓈𝑒𝓇!* ❌", show_alert=True)
+        
+        elif data.startswith("revive_"):
+            try:
+                user_id = int(data.split("_")[1])
+                context.args = [str(user_id)]
+                await revive_command(update, context)
+                await query.message.delete()
+            except:
+                await query.answer("❌ *𝐼𝓃𝓋𝒶𝓁𝒾𝒹 𝓊𝓈𝑒𝓇!* ❌", show_alert=True)
+        
+        elif data == "daily_bonus":
+            await daily_command(update, context)
+            await query.message.delete()
+        
+        elif data == "work_now":
+            await work_command(update, context)
+            await query.message.delete()
+        
+        elif data == "check_balance":
+            await balance_command(update, context)
+            await query.message.delete()
+        
+        elif data == "my_profile":
+            await profile_command(update, context)
+            await query.message.delete()
+        
+        elif data == "top_rich":
+            await top_command(update, context)
+            await query.message.delete()
+        
+        elif data == "buy_protection":
+            await protect_command(update, context)
+            await query.message.delete()
+        
+        elif data == "back_start":
+            await start_command(update, context)
+            await query.message.delete()
+        
+        elif data == "quick_start":
+            await query.edit_message_text(
+                """
+🚀 *𝒬𝓊𝒾𝒸𝓀 𝒮𝓉𝒶𝓇𝓉 𝒢𝓊𝒾𝒹𝑒* 🚀
+
+1. *𝒞𝓁𝒶𝒾𝓂 𝒟𝒶𝒾𝓁𝓎 𝐵𝑜𝓃𝓊𝓈:*
+   𝒰𝓈𝑒 /daily 𝒾𝓃 𝓅𝓇𝒾𝓋𝒶𝓉𝑒 𝒸𝒽𝒶𝓉
+
+2. *𝒞𝒽𝑒𝒸𝓀 𝒴𝑜𝓊𝓇 𝐵𝒶𝓁𝒶𝓃𝒸𝑒:*
+   /balance
+
+3. *𝐸𝒶𝓇𝓃 𝑀𝑜𝓇𝑒 𝑀𝑜𝓃𝑒𝓎:*
+   /work - 𝐸𝒶𝓇𝓃 𝒽𝑜𝓊𝓇𝓁𝓎
+   /give - 𝒯𝓇𝒶𝓃𝓈𝒻𝑒𝓇 𝓂𝑜𝓃𝑒𝓎
+
+4. *𝒫𝓁𝒶𝓎 𝒢𝒶𝓂𝑒𝓈:*
+   /bomb 100 - 𝒮𝓉𝒶𝓇𝓉 𝒷𝑜𝓂𝒷 𝑔𝒶𝓂𝑒
+   /join 100 - 𝒥𝑜𝒾𝓃 𝒶 𝑔𝒶𝓂𝑒
+
+5. *𝐵𝓊𝓎 𝒫𝓇𝑜𝓉𝑒𝒸𝓉𝒾𝑜𝓃:*
+   /protect 1 - 1 𝒹𝒶𝓎 𝓅𝓇𝑜𝓉𝑒𝒸𝓉𝒾𝑜𝓃
+
+💡 *𝒮𝓉𝒶𝓇𝓉 𝓅𝓁𝒶𝓎𝒾𝓃𝑔 𝓃𝑜𝓌!* 🎮
+                """,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 𝐵𝒶𝒸𝓀 𝓉𝑜 𝐵𝑜𝑜𝓀", callback_data="book_1")]
+                ])
+            )
+        
+        else:
+            await query.answer("✨ *𝐵𝑜𝓉 𝒾𝓈 𝓌𝑜𝓇𝓀𝒾𝓃𝑔!* ✨", show_alert=True)
+            
+    except Exception as e:
+        logging.error(f"Callback error: {e}")
+        try:
+            await query.answer("❌ *𝐸𝓇𝓇𝑜𝓇!* ❌", show_alert=True)
+        except:
+            pass
+
+# ========== SET PRICE COMMAND ==========
+async def setprice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set specific price (owner only)"""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("❌ *𝒪𝓌𝓃𝑒𝓇 𝑜𝓃𝓁𝓎 𝒸𝑜𝓂𝓂𝒶𝓃𝒹!* ❌")
+        return
+    
+    try:
+        if not context.args or len(context.args) < 2:
+            await update.message.reply_text(
+                "💰 *𝒰𝓈𝒶𝑔𝑒:* /setprice 𝓀𝑒𝓎 𝓋𝒶𝓁𝓊𝑒\n"
+                "*𝐸𝓍𝒶𝓂𝓅𝓁𝑒𝓈:*\n"
+                "/setprice kill_cost 500\n"
+                "/setprice tax_rate 10\n"
+                "/setprice protection_prices \"{1: 200, 2: 400, 3: 600}\"\n\n"
+                "𝒰𝓈𝑒 /price 𝓉𝑜 𝓈𝑒𝑒 𝒶𝓁𝓁 𝓅𝓇𝒾𝒸𝑒𝓈",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        key = context.args[0]
+        value_str = ' '.join(context.args[1:])
+        
+        # Parse value based on type
+        try:
+            # Try to parse as integer
+            value = int(value_str)
+        except:
+            try:
+                # Try to parse as float
+                value = float(value_str)
+            except:
+                try:
+                    # Try to parse as dictionary
+                    if value_str.startswith('{') and value_str.endswith('}'):
+                        value = eval(value_str)
+                    else:
+                        value = value_str
+                except:
+                    value = value_str
+        
+        # Set the price
+        db.set_bot_setting(key, value)
+        
+        await update.message.reply_text(
+            f"""
+✅ *𝒫𝓇𝒾𝒸𝑒 𝒰𝓅𝒹𝒶𝓉𝑒𝒹!* ✅
+
+🔑 *𝐾𝑒𝓎:* {key}
+💰 *𝒩𝑒𝓌 𝒱𝒶𝓁𝓊𝑒:* {value}
+🔄 *𝒰𝓅𝒹𝒶𝓉𝑒𝒹 𝒶𝓉:* {datetime.now().strftime('%I:%M %p')}
+
+💡 *𝒞𝒽𝒶𝓃𝑔𝑒𝓈 𝓌𝒾𝓁𝓁 𝓉𝒶𝓀𝑒 𝑒𝒻𝒻𝑒𝒸𝓉 𝒾𝓂𝓂𝑒𝒹𝒾𝒶𝓉𝑒𝓁𝓎!*
+            """,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logging.error(f"Setprice command error: {e}")
+        await update.message.reply_text("❌ *𝐸𝓇𝓇𝑜𝓇 𝓈𝑒𝓉𝓉𝒾𝓃𝑔 𝓅𝓇𝒾𝒸𝑒!* ❌")
+
+# ========== START COMMAND ==========
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Beautiful start command with inline keyboard"""
+    user = update.effective_user
+    
+    # Update user info
+    db.update_user(user.id, {
+        'username': user.username,
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'last_active': datetime.now().isoformat()
+    })
+    
+    welcome_text = f"""
+╔══════════════════════╗
+       🎀 𝗪𝗲𝗹𝗰𝗼𝗺𝗲  🎀
+╚══════════════════════╝
+
+🌸 *𝒢𝓇𝑒𝑒𝓉𝒾𝓃𝑔𝓈, {user.first_name}!* ✨
+
+💫 𝐼'𝓂 𝒮𝒽𝒾𝓏𝓊𝓀𝒶, 𝓎𝑜𝓊𝓇 𝒹𝒾𝑔𝒾𝓉𝒶𝓁 𝒸𝑜𝓂𝓅𝒶𝓃𝒾𝑜𝓃! 🤗
+
+🎮 *𝐹𝑒𝒶𝓉𝓊𝓇𝑒𝓈 𝒶𝓋𝒶𝒾𝓁𝒶𝒷𝓁𝑒:*
+• 💰 𝒱𝒾𝓇𝓉𝓊𝒶𝓁 𝐸𝒸𝑜𝓃𝑜𝓂𝓎 𝒮𝓎𝓈𝓉𝑒𝓂
+• 🎯 𝐸𝓍𝒸𝒾𝓉𝒾𝓃𝑔 𝒢𝒶𝓂𝑒𝓈
+• 🛍️ 𝐼𝓉𝑒𝓂 𝓈𝒽𝑜𝓅 𝒶𝓃𝒹 𝑔𝒾𝒻𝓉𝓈
+• 👥 𝒮𝑜𝒸𝒾𝒶𝓁 𝐼𝓃𝓉𝑒𝓇𝒶𝒸𝓉𝒾𝑜𝓃𝓈
+• 🤖 𝒜𝐼 𝒞𝒽𝒶𝓉 𝒞𝑜𝓂𝓅𝒶𝓃𝒾𝑜𝓃
+
+💝 *𝒴𝑜𝓊 𝓈𝓉𝒶𝓇𝓉 𝓌𝒾𝓉𝒽:* {format_money(1000)}
+    """
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("💰 𝐸𝒸𝑜𝓃𝑜𝓂𝓎", callback_data="economy_menu"),
+            InlineKeyboardButton("🎮 𝒢𝒶𝓂𝑒𝓈", callback_data="games_menu")
+        ],
+        [
+            InlineKeyboardButton("🛍️ 𝒮𝒽𝑜𝓅", callback_data="shop_menu"),
+            InlineKeyboardButton("👤 𝒫𝓇𝑜𝒻𝒾𝓁𝑒", callback_data="profile_menu")
+        ],
+        [
+            InlineKeyboardButton("📘 𝐻𝑒𝓁𝓅 𝐵𝑜𝑜𝓀", callback_data="book_1"),
+            InlineKeyboardButton("❓ 𝒬𝓊𝒾𝒸𝓀 𝐻𝑒𝓁𝓅", callback_data="quick_help")
+        ]
+    ]
+    
+    if is_owner(user.id):
+        keyboard.append([
+            InlineKeyboardButton("👑 𝒪𝓌𝓃𝑒𝓇 𝒫𝒶𝓃𝑒𝓁", callback_data="owner_panel")
+        ])
+    
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ========== HELP COMMAND ==========
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick help command"""
+    help_text = """
+🆘 *𝒬𝓊𝒾𝒸𝓀 𝐻𝑒𝓁𝓅* 🆘
+
+*📚 𝐵𝒶𝓈𝒾𝒸 𝒞𝑜𝓂𝓂𝒶𝓃𝒹𝓈:*
+/start - 𝒮𝓉𝒶𝓇𝓉 𝓉𝒽𝑒 𝒷𝑜𝓉
+/profile - 𝒴𝑜𝓊𝓇 𝓅𝓇𝑜𝒻𝒾𝓁𝑒
+/balance - 𝒞𝒽𝑒𝒸𝓀 𝓂𝑜𝓃𝑒𝓎
+/top - 𝑅𝒾𝒸𝒽𝑒𝓈𝓉 𝓅𝓁𝒶𝓎𝑒𝓇𝓈
+
+*💰 𝐸𝒶𝓇𝓃 𝑀𝑜𝓃𝑒𝓎:*
+/daily - 𝒟𝒶𝒾𝓁𝓎 𝒷𝑜𝓃𝓊𝓈 (𝒟𝑀)
+/work - 𝐸𝒶𝓇𝓃 𝒽𝑜𝓊𝓇𝓁𝓎
+/give - 𝒯𝓇𝒶𝓃𝓈𝒻𝑒𝓇 𝓂𝑜𝓃𝑒𝓎
+/deposit - 𝒮𝓉𝑜𝓇𝑒 𝒾𝓃 𝒷𝒶𝓃𝓀
+
+*🎮 𝒢𝒶𝓂𝑒𝓈:*
+/bomb - 𝒮𝓉𝒶𝓇𝓉 𝒷𝑜𝓂𝒷 𝑔𝒶𝓂𝑒
+/wordgame - 𝒮𝓉𝒶𝓇𝓉 𝓌𝑜𝓇𝒹 𝑔𝒶𝓂𝑒
+/join - 𝒥𝑜𝒾𝓃 𝒶 𝑔𝒶𝓂𝑒
+/kill - 𝒜𝓉𝓉𝒶𝒸𝓀 𝓊𝓈𝑒𝓇
+/rob - 𝑅𝑜𝒷 𝓊𝓈𝑒𝓇
+
+*🛡️ 𝒜𝒹𝓂𝒾𝓃:*
+/warn - 𝒲𝒶𝓇𝓃 𝓊𝓈𝑒𝓇
+/mute - 𝑀𝓊𝓉𝑒 𝓊𝓈𝑒𝓇
+/kick - 𝒦𝒾𝒸𝓀 𝓊𝓈𝑒𝓇
+/ban - 𝐵𝒶𝓃 𝓊𝓈𝑒𝓇
+
+*📘 𝒞𝑜𝓂𝓅𝓁𝑒𝓉𝑒 𝒢𝓊𝒾𝒹𝑒:*
+/book - 𝐹𝓊𝓁𝓁 𝒽𝑒𝓁𝓅 𝒷𝑜𝑜𝓀
+
+💡 *𝒰𝓈𝑒 𝒾𝓃𝓁𝒾𝓃𝑒 𝓀𝑒𝓎𝒷𝑜𝒶𝓇𝒹𝓈 𝒻𝑜𝓇 𝓆𝓊𝒾𝒸𝓀 𝓃𝒶𝓋𝒾𝑔𝒶𝓉𝒾𝑜𝓃!*
+    """
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("📘 𝐹𝓊𝓁𝓁 𝐻𝑒𝓁𝓅 𝐵𝑜𝑜𝓀", callback_data="book_1"),
+            InlineKeyboardButton("🎮 𝒬𝓊𝒾𝒸𝓀 𝒮𝓉𝒶𝓇𝓉", callback_data="quick_start")
+        ],
+        [
+            InlineKeyboardButton("💰 𝐸𝒸𝑜𝓃𝑜𝓂𝓎 𝒢𝓊𝒾𝒹𝑒", callback_data="economy_guide"),
+            InlineKeyboardButton("🔙 𝑀𝒶𝒾𝓃 𝑀𝑒𝓃𝓊", callback_data="back_main")
+        ]
+    ]
+    
+    await update.message.reply_text(
+        help_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ========== SCHEDULED TASKS ==========
+async def scheduled_tasks():
+    """Run scheduled tasks"""
+    try:
+        # Check and auto-end expired games
+        await GameManager.check_expired_games()
+        
+        # Remove old pinned messages
+        db.remove_old_pins()
+        
+        # Apply daily bank interest
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            interest_rate = db.get_bot_setting('bank_interest', 0.1) / 100
+            
+            cursor.execute("SELECT user_id, bank FROM users WHERE bank > 0")
+            users = cursor.fetchall()
+            
+            for user_id, bank_balance in users:
+                interest = int(bank_balance * interest_rate)
+                if interest > 0:
+                    db.add_cash(user_id, interest, "Daily bank interest")
+        
+    except Exception as e:
+        logging.error(f"Scheduled tasks error: {e}")
+
+# ========== MAIN FUNCTION ==========
+def main():
+    """Start the bot"""
+    try:
+        # Create application
+        application = Application.builder().token(TOKEN).build()
+        
+        # Add error handler
+        application.add_error_handler(error_handler)
+        
+        # Add command handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("book", book_command))
+        application.add_handler(CommandHandler("profile", profile_command))
+        application.add_handler(CommandHandler("balance", balance_command))
+        application.add_handler(CommandHandler("top", top_command))
+        application.add_handler(CommandHandler("daily", daily_command))
+        application.add_handler(CommandHandler("work", work_command))
+        application.add_handler(CommandHandler("give", give_command))
+        
+        # Banking commands
+        application.add_handler(CommandHandler("deposit", deposit_command))
+        application.add_handler(CommandHandler("withdraw", withdraw_command))
+        
+        # Game commands
+        application.add_handler(CommandHandler("kill", kill_command))
+        application.add_handler(CommandHandler("rob", rob_command))
+        application.add_handler(CommandHandler("protect", protect_command))
+        application.add_handler(CommandHandler("revive", revive_command))
+        application.add_handler(CommandHandler("bomb", GameManager.start_bomb_game))
+        application.add_handler(CommandHandler("wordgame", GameManager.start_word_game))
+        application.add_handler(CommandHandler("join", GameManager.join_game))
+        application.add_handler(CommandHandler("leave", GameManager.leave_game))
+        application.add_handler(CommandHandler("couples", couples_command))
+        
+        # Rating commands
+        application.add_handler(CommandHandler("look", look_command))
+        application.add_handler(CommandHandler("brain", brain_command))
+        application.add_handler(CommandHandler("details", details_command))
+        
+        # Shop commands
+        application.add_handler(CommandHandler("items", items_command))
+        application.add_handler(CommandHandler("myitems", myitems_command))
+        application.add_handler(CommandHandler("buy", buy_command))
+        application.add_handler(CommandHandler("gift", gift_command))
+        application.add_handler(CommandHandler("newitem", newitem_command))
+        
+        # Owner commands
+        application.add_handler(CommandHandler("ownerhelp", ownerhelp_command))
+        application.add_handler(CommandHandler("export", export_command))
+        application.add_handler(CommandHandler("import", import_command))
+        application.add_handler(CommandHandler("broadcast", broadcast_command))
+        application.add_handler(CommandHandler("price", price_command))
+        application.add_handler(CommandHandler("prices", view_prices_command))
+        application.add_handler(CommandHandler("setprice", setprice_command))
+        application.add_handler(CommandHandler("deleteitem", deleteitem_command))
+        
+        # Group admin commands
+        application.add_handler(CommandHandler("warn", warn_command))
+        application.add_handler(CommandHandler("mute", mute_command))
+        application.add_handler(CommandHandler("unmute", unmute_command))
+        application.add_handler(CommandHandler("kick", kick_command))
+        application.add_handler(CommandHandler("ban", ban_command))
+        application.add_handler(CommandHandler("unban", unban_command))
+        
+        # Welcome/farewell handlers
+        application.add_handler(MessageHandler(
+            filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_message
+        ))
+        application.add_handler(MessageHandler(
+            filters.StatusUpdate.LEFT_CHAT_MEMBER, farewell_message
+        ))
+        
+        # Message reaction handler
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            message_reaction
+        ), group=1)
+        
+        # Callback query handler
+        application.add_handler(CallbackQueryHandler(callback_handler))
+        
+        # AI Chat handler (lower priority)
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            chat_handler
+        ), group=2)
+        
+        # Start scheduler for periodic tasks
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(scheduled_tasks, 'interval', minutes=5)
+        scheduler.start()
+        
+        # Start bot
+        print("=" * 50)
+        print(f"🌸 {db.get_bot_setting('bot_name', '𝒮𝒽𝒾𝓏𝓊𝓀𝒶 𝐵𝑜𝓉')} 𝒾𝓈 𝓈𝓉𝒶𝓇𝓉𝒾𝓃𝑔...")
+        print("=" * 50)
+        print("✨ 𝐹𝑒𝒶𝓉𝓊𝓇𝑒𝓈 𝓁𝑜𝒶𝒹𝑒𝒹:")
+        print("   💰 𝒞𝑜𝓂𝓅𝓁𝑒𝓉𝑒 𝐸𝒸𝑜𝓃𝑜𝓂𝓎 𝒶𝓃𝒹 𝐵𝒶𝓃𝓀𝒾𝓃𝑔 𝒮𝓎𝓈𝓉𝑒𝓂")
+        print("   🎮 12 𝒢𝒶𝓂𝑒𝓈 𝓅𝑒𝓇 𝒢𝓇𝑜𝓊𝓅 𝓌𝒾𝓉𝒽 𝒜𝓊𝓉𝑜-𝐸𝓃𝒹")
+        print("   🛍️ 𝐼𝓉𝑒𝓂𝒾𝓏𝒶𝓉𝒾𝑜𝓃 𝓌𝒾𝓉𝒽 𝒢𝒾𝒻𝓉𝒾𝓃𝑔 𝒮𝓎𝓈𝓉𝑒𝓂")
+        print("   👀 𝐿𝑜𝑜𝓀 & 𝐵𝓇𝒶𝒾𝓃 𝑅𝒶𝓉𝒾𝓃𝑔 𝒞𝑜𝓂𝓂𝒶𝓃𝒹𝓈")
+        print("   📜 𝒰𝓈𝑒𝓇 𝒟𝑒𝓉𝒶𝒾𝓁𝓈 𝐻𝒾𝓈𝓉𝑜𝓇𝓎")
+        print("   👑 𝒜𝒹𝓋𝒶𝓃𝒸𝑒𝒹 𝒪𝓌𝓃𝑒𝓇 𝒫𝓇𝒾𝒸𝑒 𝑀𝒶𝓃𝒶𝑔𝑒𝓂𝑒𝓃𝓉")
+        print("   📤 𝒟𝒶𝓉𝒶 𝐸𝓍𝓅𝑜𝓇𝓉/𝐼𝓂𝓅𝑜𝓇𝓉 𝒮𝓎𝓈𝓉𝑒𝓂")
+        print("   📢 𝐸𝓃𝒽𝒶𝓃𝒸𝑒𝒹 𝐵𝓇𝑜𝒶𝒹𝒸𝒶𝓈𝓉 𝒮𝓎𝓈𝓉𝑒𝓂")
+        print("   🤖 𝒜𝐼 𝒞𝒽𝒶𝓉 𝓌𝒾𝓉𝒽 𝒢𝑒𝓂𝒾𝓃𝒾")
+        print("   🛡️ 𝐶𝑜𝓂𝓅𝓁𝑒𝓉𝑒 𝑀𝑜𝒹𝑒𝓇𝒶𝓉𝒾𝑜𝓃 𝒯𝑜𝑜𝓁𝓈")
+        print("   💖 𝒲𝑒𝓁𝒸𝑜𝓂𝑒/𝐹𝒶𝓇𝑒𝓌𝑒𝓁𝓁 𝑀𝑒𝓈𝓈𝒶𝑔𝑒𝓈")
+        print("   💖 𝒞𝑜𝓊𝓅𝓁𝑒 𝓸𝒻 𝓽𝒽𝓮 𝒟𝒶𝓎")
+        print("   📘 𝐼𝓃𝓉𝑒𝓇𝒶𝒸𝓉𝒾𝓋𝑒 𝐻𝑒𝓁𝓅 𝐵𝑜𝑜𝓀")
+        print("   👍 𝒜𝓊𝓉𝑜 𝒮𝓂𝒶𝓇𝓉 𝑅𝑒𝒶𝒸𝓉𝒾𝑜𝓃𝓈")
+        print("=" * 50)
+        print("✅ 𝒟𝒶𝓉𝒶𝒷𝒶𝓈𝑒 𝒾𝓃𝒾𝓉𝒾𝒶𝓁𝒾𝓏𝑒𝒹 𝓈𝓊𝒸𝒸𝑒𝓈𝓈𝒻𝓊𝓁𝓁𝓎!")
+        print("✅ 𝒜𝓁𝓁 𝐹𝑂𝑅𝐸𝐼𝐺𝑁 𝒦𝐸𝒴 𝒸𝑜𝓃𝓈𝓉𝓇𝒶𝒾𝓃𝓉𝓈 𝒶𝓇𝑒 𝑒𝓃𝒶𝒷𝓁𝑒𝒹!")
+        print("=" * 50)
+        
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        logging.error(f"Failed to start bot: {e}")
+        print("❌ 𝐵𝑜𝓉 𝒻𝒶𝒾𝓁𝑒𝒹 𝓉𝑜 𝓈𝓉𝒶𝓇𝓉. 𝒞𝒽𝑒𝒸𝓀 𝓎𝑜𝓊𝓇 𝒸𝑜𝓃𝒻𝒾𝑔𝓊𝓇𝒶𝓉𝒾𝑜𝓃 𝒶𝓃𝒹 𝓉𝓇𝓎 𝒶𝑔𝒶𝒾𝓃.")
+
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=logging.INFO
+    )
+    
+    # Check required configurations
+    if TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ 𝐸𝑅𝑅𝑂𝑅: 𝒫𝓁𝑒𝒶𝓈𝑒 𝓈𝑒𝓉 𝓎𝑜𝓊𝓇 𝒷𝑜𝓉 𝓉𝑜𝓀𝑒𝓃 𝒾𝓃 𝒯𝑂𝒦𝐸𝒩 𝓋𝒶𝓇𝒾𝒶𝒷𝓁𝑒!")
+        exit(1)
+    
+    if GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
+        print("⚠️ 𝒲𝒜𝑅𝒩𝐼𝒩𝒢: 𝒢𝑒𝓂𝒾𝓃𝒾 𝒜𝒫𝐼 𝓀𝑒𝓎 𝓃𝑜𝓉 𝓈𝑒𝓉. 𝒜𝐼 𝒸𝒽𝒶𝓉 𝓌𝒾𝓁𝓁 𝓊𝓈𝑒 𝒻𝒶𝓁𝓁𝒷𝒶𝒸𝓀 𝓇𝑒𝓈𝓅𝑜𝓃𝓈𝑒𝓈.")
+    
+    if BOT_OWNER_ID == 123456789:
+        print("⚠️ 𝒲𝒜𝑅𝒩𝐼𝒩𝒢: 𝒫𝓁𝑒𝒶𝓈𝑒 𝓈𝑒𝓉 𝓎𝑜𝓊𝓇 𝒯𝑒𝓁𝑒𝑔𝓇𝒶𝓂 𝐼𝒟 𝒾𝓃 𝐵𝑂𝒯_𝒪𝒲𝒩𝐸𝑅_𝐼𝒟 𝓋𝒶𝓇𝒾𝒶𝒷𝓁𝑒!")
+    
+    main()
