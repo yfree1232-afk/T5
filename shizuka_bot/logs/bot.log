@@ -1,0 +1,149 @@
+2026-01-12 16:45:10 - shizuka_bot.database.manager - INFO - [manager.py:168] - ✅ All tables initialized with indexes and defaults
+2026-01-12 16:45:10 - shizuka_bot.database.manager - INFO - [manager.py:23] - ✅ Database initialized: shizuka_world.db
+2026-01-12 16:45:10 - shizuka_bot - INFO - [app.py:37] - Validating configuration...
+2026-01-12 16:45:10 - shizuka_bot - INFO - [app.py:41] - ✅ Token format valid
+2026-01-12 16:45:10 - shizuka_bot.config.settings - INFO - [settings.py:128] - ✅ Configuration validated successfully
+2026-01-12 16:45:10 - shizuka_bot - INFO - [app.py:45] - ✅ Full configuration validated
+2026-01-12 16:45:10 - shizuka_bot - INFO - [app.py:123] - Creating bot application...
+2026-01-12 16:45:10 - shizuka_bot - INFO - [app.py:111] - ✅ Registered 1 handler groups
+2026-01-12 16:45:10 - shizuka_bot - INFO - [app.py:154] - 🚀 Starting polling...
+2026-01-12 16:45:10 - shizuka_bot - CRITICAL - [app.py:164] - ❌ FATAL ERROR: Cannot close a running event loop
+Traceback (most recent call last):
+  File "/usr/local/python/3.12.1/lib/python3.12/site-packages/telegram/ext/_application.py", line 1063, in __run
+    loop.run_until_complete(self.initialize())
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 660, in run_until_complete
+    self._check_running()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 619, in _check_running
+    raise RuntimeError('This event loop is already running')
+RuntimeError: This event loop is already running
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/python/3.12.1/lib/python3.12/site-packages/telegram/ext/_application.py", line 1088, in __run
+    loop.run_until_complete(self.shutdown())
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 660, in run_until_complete
+    self._check_running()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 619, in _check_running
+    raise RuntimeError('This event loop is already running')
+RuntimeError: This event loop is already running
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspaces/T5/shizuka_bot/app.py", line 157, in start
+    await self.application.run_polling(allowed_updates=["message", "callback_query"])
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python/3.12.1/lib/python3.12/site-packages/telegram/ext/_application.py", line 865, in run_polling
+    return self.__run(
+           ^^^^^^^^^^^
+  File "/usr/local/python/3.12.1/lib/python3.12/site-packages/telegram/ext/_application.py", line 1093, in __run
+    loop.close()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/unix_events.py", line 68, in close
+    super().close()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/selector_events.py", line 101, in close
+    raise RuntimeError("Cannot close a running event loop")
+RuntimeError: Cannot close a running event loop
+2026-01-12 16:46:50 - shizuka_bot.database.manager - INFO - [manager.py:168] - ✅ All tables initialized with indexes and defaults
+2026-01-12 16:46:50 - shizuka_bot.database.manager - INFO - [manager.py:23] - ✅ Database initialized: shizuka_world.db
+2026-01-12 16:46:50 - shizuka_bot - INFO - [app.py:37] - Validating configuration...
+2026-01-12 16:46:50 - shizuka_bot - INFO - [app.py:41] - ✅ Token format valid
+2026-01-12 16:46:50 - shizuka_bot.config.settings - INFO - [settings.py:128] - ✅ Configuration validated successfully
+2026-01-12 16:46:50 - shizuka_bot - INFO - [app.py:45] - ✅ Full configuration validated
+2026-01-12 16:46:50 - shizuka_bot - INFO - [app.py:123] - Creating bot application...
+2026-01-12 16:46:51 - shizuka_bot - INFO - [app.py:111] - ✅ Registered 1 handler groups
+2026-01-12 16:46:51 - shizuka_bot - INFO - [app.py:154] - 🚀 Starting polling...
+2026-01-12 16:46:51 - shizuka_bot - CRITICAL - [app.py:164] - ❌ FATAL ERROR: Cannot close a running event loop
+Traceback (most recent call last):
+  File "/usr/local/python/3.12.1/lib/python3.12/site-packages/telegram/ext/_application.py", line 1063, in __run
+    loop.run_until_complete(self.initialize())
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 660, in run_until_complete
+    self._check_running()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 619, in _check_running
+    raise RuntimeError('This event loop is already running')
+RuntimeError: This event loop is already running
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/python/3.12.1/lib/python3.12/site-packages/telegram/ext/_application.py", line 1088, in __run
+    loop.run_until_complete(self.shutdown())
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 660, in run_until_complete
+    self._check_running()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 619, in _check_running
+    raise RuntimeError('This event loop is already running')
+RuntimeError: This event loop is already running
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspaces/T5/shizuka_bot/app.py", line 157, in start
+    await self.application.run_polling(allowed_updates=["message", "callback_query"])
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/python/3.12.1/lib/python3.12/site-packages/telegram/ext/_application.py", line 865, in run_polling
+    return self.__run(
+           ^^^^^^^^^^^
+  File "/usr/local/python/3.12.1/lib/python3.12/site-packages/telegram/ext/_application.py", line 1093, in __run
+    loop.close()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/unix_events.py", line 68, in close
+    super().close()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/selector_events.py", line 101, in close
+    raise RuntimeError("Cannot close a running event loop")
+RuntimeError: Cannot close a running event loop
+2026-01-12 17:24:00 - shizuka_bot.database.manager - INFO - [manager.py:168] - ✅ All tables initialized with indexes and defaults
+2026-01-12 17:24:00 - shizuka_bot.database.manager - INFO - [manager.py:23] - ✅ Database initialized: shizuka_world.db
+2026-01-12 17:24:00 - shizuka_bot - INFO - [app.py:37] - Validating configuration...
+2026-01-12 17:24:00 - shizuka_bot - INFO - [app.py:41] - ✅ Token format valid
+2026-01-12 17:24:00 - shizuka_bot.config.settings - INFO - [settings.py:128] - ✅ Configuration validated successfully
+2026-01-12 17:24:00 - shizuka_bot - INFO - [app.py:45] - ✅ Full configuration validated
+2026-01-12 17:24:00 - shizuka_bot - INFO - [app.py:123] - Creating bot application...
+2026-01-12 17:24:01 - shizuka_bot - INFO - [app.py:111] - ✅ Registered 1 handler groups
+2026-01-12 17:24:01 - shizuka_bot - INFO - [app.py:154] - 🚀 Starting polling...
+2026-01-12 17:24:01 - shizuka_bot - CRITICAL - [app.py:160] - ❌ INVALID TOKEN: The token `7024284731:AANGJOSSVMAC2JOKINGBPMORAZVOJNORI` was rejected by the server.
+2026-01-12 17:31:06 - shizuka_bot.database.manager - INFO - [manager.py:168] - ✅ All tables initialized with indexes and defaults
+2026-01-12 17:31:06 - shizuka_bot.database.manager - INFO - [manager.py:23] - ✅ Database initialized: shizuka_world.db
+2026-01-12 17:31:06 - shizuka_bot - INFO - [app.py:37] - Validating configuration...
+2026-01-12 17:31:06 - shizuka_bot - INFO - [app.py:41] - ✅ Token format valid
+2026-01-12 17:31:06 - shizuka_bot.config.settings - INFO - [settings.py:128] - ✅ Configuration validated successfully
+2026-01-12 17:31:06 - shizuka_bot - INFO - [app.py:45] - ✅ Full configuration validated
+2026-01-12 17:31:06 - shizuka_bot - INFO - [app.py:123] - Creating bot application...
+2026-01-12 17:31:06 - shizuka_bot - INFO - [app.py:111] - ✅ Registered 1 handler groups
+2026-01-12 17:31:06 - shizuka_bot - INFO - [app.py:154] - 🚀 Starting polling...
+2026-01-12 17:31:07 - shizuka_bot - CRITICAL - [app.py:160] - ❌ INVALID TOKEN: The token `7024284731:AANGJOSSVMAC2JOKINGBPMORAZVOJNORI` was rejected by the server.
+2026-01-12 17:32:59 - shizuka_bot.database.manager - INFO - [manager.py:168] - ✅ All tables initialized with indexes and defaults
+2026-01-12 17:32:59 - shizuka_bot.database.manager - INFO - [manager.py:23] - ✅ Database initialized: shizuka_world.db
+2026-01-12 17:32:59 - shizuka_bot - INFO - [app.py:37] - Validating configuration...
+2026-01-12 17:32:59 - shizuka_bot - INFO - [app.py:41] - ✅ Token format valid
+2026-01-12 17:32:59 - shizuka_bot.config.settings - INFO - [settings.py:128] - ✅ Configuration validated successfully
+2026-01-12 17:32:59 - shizuka_bot - INFO - [app.py:45] - ✅ Full configuration validated
+2026-01-12 17:32:59 - shizuka_bot - INFO - [app.py:123] - Creating bot application...
+2026-01-12 17:32:59 - shizuka_bot - INFO - [app.py:111] - ✅ Registered 1 handler groups
+2026-01-12 17:32:59 - shizuka_bot - INFO - [app.py:154] - 🚀 Starting polling...
+2026-01-12 17:33:03 - shizuka_bot - INFO - [app.py:170] - Post-init: Bot connection established
+2026-01-12 17:33:50 - shizuka_bot.handlers.messages - ERROR - [messages.py:91] - AI response error: 404 models/gemini-pro is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.
+2026-01-12 17:33:56 - shizuka_bot.utils.error_handler - WARNING - [error_handler.py:23] - ⚠️ Network error: Can't parse entities: can't find end of the entity starting at byte offset 990
+2026-01-12 17:34:26 - shizuka_bot.utils.error_handler - WARNING - [error_handler.py:23] - ⚠️ Network error: Can't parse entities: can't find end of the entity starting at byte offset 990
+2026-01-12 17:34:37 - shizuka_bot.utils.error_handler - WARNING - [error_handler.py:23] - ⚠️ Network error: Can't parse entities: can't find end of the entity starting at byte offset 990
+2026-01-12 17:35:06 - shizuka_bot.utils.error_handler - WARNING - [error_handler.py:23] - ⚠️ Network error: Can't parse entities: can't find end of the entity starting at byte offset 990
+2026-01-13 13:27:24 - shizuka_bot.database.manager - INFO - [manager.py:168] - ✅ All tables initialized with indexes and defaults
+2026-01-13 13:27:24 - shizuka_bot.database.manager - INFO - [manager.py:23] - ✅ Database initialized: shizuka_world.db
+2026-01-13 13:27:24 - shizuka_bot - INFO - [app.py:37] - Validating configuration...
+2026-01-13 13:27:24 - shizuka_bot - INFO - [app.py:41] - ✅ Token format valid
+2026-01-13 13:27:24 - shizuka_bot.config.settings - INFO - [settings.py:128] - ✅ Configuration validated successfully
+2026-01-13 13:27:24 - shizuka_bot - INFO - [app.py:45] - ✅ Full configuration validated
+2026-01-13 13:27:24 - shizuka_bot - INFO - [app.py:123] - Creating bot application...
+2026-01-13 13:27:24 - shizuka_bot - INFO - [app.py:111] - ✅ Registered 1 handler groups
+2026-01-13 13:27:24 - shizuka_bot - INFO - [app.py:154] - 🚀 Starting polling...
+2026-01-13 13:27:24 - shizuka_bot - INFO - [app.py:170] - Post-init: Bot connection established
+2026-01-13 13:27:59 - shizuka_bot.utils.error_handler - WARNING - [error_handler.py:23] - ⚠️ Network error: Can't parse entities: can't find end of the entity starting at byte offset 990
+2026-01-13 13:36:01 - shizuka_bot.database.manager - INFO - [manager.py:168] - ✅ All tables initialized with indexes and defaults
+2026-01-13 13:36:01 - shizuka_bot.database.manager - INFO - [manager.py:23] - ✅ Database initialized: shizuka_world.db
+2026-01-13 13:36:01 - shizuka_bot - INFO - [app.py:37] - Validating configuration...
+2026-01-13 13:36:01 - shizuka_bot - INFO - [app.py:41] - ✅ Token format valid
+2026-01-13 13:36:01 - shizuka_bot.config.settings - INFO - [settings.py:128] - ✅ Configuration validated successfully
+2026-01-13 13:36:01 - shizuka_bot - INFO - [app.py:45] - ✅ Full configuration validated
+2026-01-13 13:36:01 - shizuka_bot - INFO - [app.py:123] - Creating bot application...
+2026-01-13 13:36:01 - shizuka_bot - INFO - [app.py:111] - ✅ Registered 1 handler groups
+2026-01-13 13:36:01 - shizuka_bot - INFO - [app.py:154] - 🚀 Starting polling...
+2026-01-13 13:36:02 - shizuka_bot - INFO - [app.py:170] - Post-init: Bot connection established
+2026-01-13 13:36:15 - shizuka_bot.handlers.commands - WARNING - [commands.py:31] - Reply failed with Can't parse entities: can't find end of the entity starting at byte offset 990; sending plain text

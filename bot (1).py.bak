@@ -22,140 +22,145 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode, ChatAction
 import google.generativeai as genai
+import time
+from telegram.error import InvalidToken
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 # ========== CONFIGURATION ==========
-TOKEN = "7024284731:AANGJOSSVMAC2JOKINGBPMORAZVOJNORI"
+TOKEN = "7024284731:AANGJOSSVMAC2JOKINGBPMORAZVOJNORI".strip()
 GEMINI_API_KEY = "AIzaSyAHJASpFanIZ1FHD7D-zzpUrIzcbEv5qr8"
 BOT_OWNER_ID = 5536920122 # Replace with your Telegram ID
 ADMIN_IDS = []  # Add additional admin IDs here
 DATABASE_FILE = "shizuka_world.db"
+    retry_delay = 5
+    while True:
+        try:
+            # Create application - strip token to remove any whitespace
+            application = Application.builder().token(TOKEN.strip()).build()
 
-# Bot settings (owner can change these)
-BOT_SETTINGS = {
-    "show_protection_time": True,
-    "kill_success_rate": 50,
-    "rob_success_rate": 40,
-    "kill_fail_cooldown": 30,
-    "kill_cost": 500,
-    "revive_cost": 1000,
-    "rob_cooldown": 60,
-    "protection_prices": {1: 200, 2: 400, 3: 600},
-    "daily_bonus_base": 100,
-    "work_min": 100,
-    "work_max": 500,
-    "tax_rate": 10,
-    "default_currency": "$",
-    "bot_name": "@ImShizukaBot",
-    "wordgame_min_players": 2,
-    "wordgame_max_players": 10,
-    "bombgame_min_players": 2,
-    "bombgame_max_players": 10,
-    "leave_penalty": 10,
-    "max_items_per_page": 10,
-    "min_deposit": 10,
-    "min_withdraw": 10,
-    "bank_interest": 0.1,
-    "lottery_ticket_price": 100,
-    "lottery_prize_base": 1000,
-    "max_bank_percentage": 70,
-    "max_games_per_group": 12,
-    "game_wait_time": 180,
-    "bank_deposit_fee": 1,
-    "bank_withdraw_fee": 2,
-    "couple_show_duration": 24,
-    "pin_duration": 24,
-    "reaction_good": "❤️",
-    "reaction_bad": "👎",
-    "reaction_chance": 30,
-    "max_players_custom": 20
-}
+            # Add error handler
+            application.add_error_handler(error_handler)
 
-# Default items shop
-DEFAULT_ITEMS = [
-    {"name": "Chocolate 🍫", "price": 1000, "emoji": "🍫", "description": "Sweet chocolate for your loved one"},
-    {"name": "Rose 🌹", "price": 500, "emoji": "🌹", "description": "Beautiful red rose"},
-    {"name": "Diamond 💎", "price": 10000, "emoji": "💎", "description": "Precious diamond"},
-    {"name": "Cake 🎂", "price": 2000, "emoji": "🎂", "description": "Delicious birthday cake"},
-    {"name": "Teddy Bear 🧸", "price": 1500, "emoji": "🧸", "description": "Cuddly teddy bear"},
-    {"name": "Love Letter 💌", "price": 300, "emoji": "💌", "description": "Romantic love letter"},
-    {"name": "Ring 💍", "price": 5000, "emoji": "💍", "description": "Promise ring"},
-    {"name": "Bouquet 💐", "price": 1200, "emoji": "💐", "description": "Beautiful flower bouquet"},
-    {"name": "Golden Crown 👑", "price": 50000, "emoji": "👑", "description": "Royal golden crown"},
-    {"name": "Mystery Box 🎁", "price": 3000, "emoji": "🎁", "description": "Mystery gift box"}
-]
+            # Add command handlers
+            application.add_handler(CommandHandler("start", start_command))
+            application.add_handler(CommandHandler("help", help_command))
+            application.add_handler(CommandHandler("book", book_command))
+            # application.add_handler(CommandHandler("profile", profile_command))
+            # application.add_handler(CommandHandler("balance", balance_command))
+            # application.add_handler(CommandHandler("top", top_command))
+            # application.add_handler(CommandHandler("daily", daily_command))
+            # application.add_handler(CommandHandler("work", work_command))
+            application.add_handler(CommandHandler("give", give_command))
 
-# Initialize Gemini
-try:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-pro')
-except:
-    gemini_model = None
+            # Add stop command (owner only)
+            application.add_handler(CommandHandler("stop", stop_command))
 
-# ========== DATABASE MANAGER ==========
-class DatabaseManager:
-    def __init__(self, db_file: str = DATABASE_FILE):
-        self.db_file = db_file
-        self.init_database()
-    
-    def get_connection(self):
-        conn = sqlite3.connect(self.db_file, check_same_thread=False)
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
-    
-    def init_database(self):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Users table
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                cash INTEGER DEFAULT 1000,
-                bank INTEGER DEFAULT 0,
-                daily_streak INTEGER DEFAULT 0,
-                last_daily TEXT,
-                last_kill_time TEXT,
-                last_rob_time TEXT,
-                kill_cooldown_until TEXT,
-                jail_until TEXT,
-                revive_until TEXT,
-                kills INTEGER DEFAULT 0,
-                deaths INTEGER DEFAULT 0,
-                rob_success INTEGER DEFAULT 0,
-                rob_failed INTEGER DEFAULT 0,
-                rob_earned INTEGER DEFAULT 0,
-                protection_until TEXT,
-                bio TEXT DEFAULT "🌟 A mysterious soul in Shizuka's world!",
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                last_active TEXT DEFAULT CURRENT_TIMESTAMP,
-                total_earned INTEGER DEFAULT 0,
-                total_spent INTEGER DEFAULT 0,
-                look_rating INTEGER DEFAULT 0,
-                brain_rating INTEGER DEFAULT 0,
-                items TEXT DEFAULT '{}',
-                banned INTEGER DEFAULT 0,
-                last_deposit TEXT,
-                last_withdraw TEXT
-            )
-            ''')
-            
-            # User name history
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_history (
-                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                old_username TEXT,
-                old_first_name TEXT,
-                change_time TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
-            )
-            ''')
-            
+            # Banking commands
+            application.add_handler(CommandHandler("deposit", deposit_command))
+            application.add_handler(CommandHandler("withdraw", withdraw_command))
+
+            # Game commands
+            application.add_handler(CommandHandler("kill", kill_command))
+            # application.add_handler(CommandHandler("rob", rob_command))
+            # application.add_handler(CommandHandler("protect", protect_command))
+            application.add_handler(CommandHandler("revive", revive_command))
+            application.add_handler(CommandHandler("bomb", GameManager.start_bomb_game))
+            application.add_handler(CommandHandler("wordgame", GameManager.start_word_game))
+            application.add_handler(CommandHandler("join", GameManager.join_game))
+            application.add_handler(CommandHandler("leave", GameManager.leave_game))
+            application.add_handler(CommandHandler("couples", couples_command))
+
+            # Rating commands
+            application.add_handler(CommandHandler("look", look_command))
+            application.add_handler(CommandHandler("brain", brain_command))
+            # application.add_handler(CommandHandler("details", details_command))
+
+            # Shop commands
+            application.add_handler(CommandHandler("items", items_command))
+            # application.add_handler(CommandHandler("myitems", myitems_command))
+            # application.add_handler(CommandHandler("buy", buy_command))
+            # application.add_handler(CommandHandler("gift", gift_command))
+            # application.add_handler(CommandHandler("newitem", newitem_command))
+
+            # Owner commands
+            # application.add_handler(CommandHandler("ownerhelp", ownerhelp_command))
+            # application.add_handler(CommandHandler("export", export_command))
+            # application.add_handler(CommandHandler("import", import_command))
+            # application.add_handler(CommandHandler("broadcast", broadcast_command))
+            application.add_handler(CommandHandler("price", price_command))
+            application.add_handler(CommandHandler("prices", view_prices_command))
+            application.add_handler(CommandHandler("setprice", setprice_command))
+            application.add_handler(CommandHandler("deleteitem", deleteitem_command))
+
+            # Group admin commands
+            # application.add_handler(CommandHandler("warn", warn_command))
+            application.add_handler(CommandHandler("mute", mute_command))
+            application.add_handler(CommandHandler("unmute", unmute_command))
+            application.add_handler(CommandHandler("kick", kick_command))
+            application.add_handler(CommandHandler("ban", ban_command))
+            application.add_handler(CommandHandler("unban", unban_command))
+
+            # Message reaction handler
+            application.add_handler(MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                message_reaction
+            ), group=1)
+
+            # Callback query handler
+            application.add_handler(CallbackQueryHandler(callback_handler))
+
+            # Start scheduler for periodic tasks (if async event loop is available)
+            # Note: Scheduler will be managed by the application
+            try:
+                scheduler = AsyncIOScheduler()
+                scheduler.add_job(scheduled_tasks, 'interval', minutes=5)
+                # Don't start here, let telegram.ext handle it
+                # scheduler.start()
+            except Exception as e:
+                logging.warning(f"Could not set up scheduler: {e}")
+
+            # Start bot
+            print("=" * 50)
+            print(f"🌸 {db.get_bot_setting('bot_name', '𝒮𝒽𝒾𝓏𝓊𝓀𝒶 𝐵𝑜𝓉')} 𝒾𝓈 𝓈𝓉𝒶𝓇𝓉𝒾𝓃𝑔...")
+            print("=" * 50)
+            print("✨ 𝐹𝑒𝒶𝓉𝓊𝓇𝑒𝓈 𝓁𝑜𝒶𝒹𝑒𝒹:")
+            print("   💰 𝒞𝑜𝓂𝓅𝓁𝑒𝓉𝑒 𝐸𝒸𝑜𝓃𝑜𝓂𝓎 𝒶𝓃𝒹 𝐵𝒶𝓃𝓀𝒾𝓃𝑔 𝒮𝓎𝓈𝓉𝑒𝓂")
+            print("   🎮 12 𝒢𝒶𝓂𝑒𝓈 𝓅𝑒𝓇 𝒢𝓇𝑜𝓊𝓅 𝓌𝒾𝓉𝒽 𝒜𝓊𝓉𝑜-𝐸𝓃𝒹")
+            print("   🛍️ 𝐼𝓉𝑒𝓂𝒾𝓏𝒶𝓉𝒾𝓸𝓃 𝓌𝒾𝓉𝒽 𝒢𝒾𝒻𝓉𝒾𝓃𝑔 𝒮𝓎𝓈𝓉𝑒𝓂")
+            print("   👀 𝐿𝑜𝑜𝓀 & 𝐵𝓇𝒶𝒾𝓃 𝑅𝒶𝓉𝒾𝓃𝑔 𝒞𝑜𝓂𝓂𝒶𝓃𝒹𝓈")
+            print("   📜 𝒰𝓈𝑒𝓇 𝒟𝑒𝓉𝒶𝒾𝓁𝓈 𝐻𝒾𝓈𝓉𝑜𝓇𝓎")
+            print("   👑 𝒜𝒹𝓋𝒶𝓃𝒸𝑒𝒹 𝒪𝓌𝓃𝑒𝓇 𝒫𝓇𝒾𝒸𝑒 𝑀𝒶𝓃𝒶𝑔𝑒𝓂𝑒𝓃𝓉")
+            print("   📤 𝒟𝒶𝓉𝒶 𝐸𝓍𝓅𝑜𝓇𝓉/𝐼𝓂𝓅𝑜𝓇𝓉 𝒮𝓎𝓈𝓉𝑒𝓂")
+            print("   📢 𝐸𝓃𝒽𝒶𝓃𝒸𝑒𝒹 𝐵𝓇𝑜𝒶𝒹𝒸𝒶𝓈𝓉 𝒮𝓎𝓈𝓉𝑒𝓂")
+            print("   🤖 𝒜𝐼 𝒞𝒽𝒶𝓉 𝓌𝒾𝓉𝒽 𝒢𝑒𝓂𝒾𝓃𝒾")
+            print("   🛡️ 𝐶𝑜𝓂𝓅𝓁𝑒𝓉𝑒 𝑀𝑜𝒹𝑒𝓇𝒶𝓉𝒾𝓸𝓃 𝒯𝑜𝑜𝓁𝓈")
+            print("   💖 𝒲𝑒𝓁𝒸𝑜𝓂𝑒/𝐹𝒶𝓇𝑒𝓌𝑒𝓁𝓁 𝑀𝑒𝓈𝓈𝒶𝑔𝑒𝓈")
+            print("   💖 𝒞𝑜𝓊𝓅𝓁𝑒 𝓸𝒻 𝓽𝒽𝓮 𝒟𝒶𝓎")
+            print("   📘 𝐼𝓃𝓉𝑒𝓇𝒶𝒸𝓉𝒾𝓋𝑒 𝐻𝑒𝓁𝓅 𝐵𝑜𝑜𝓴")
+            print("   👍 𝒜𝓊𝓉𝑜 𝒮𝓂𝒶𝓇𝓉 𝑅𝑒𝒶𝒸𝓉𝒾𝓸𝓃𝓈")
+            print("=" * 50)
+            print("✅ 𝒟𝒶𝓉𝒂𝒷𝒶𝓈𝑒 𝒾𝓃𝒾𝓉𝒾𝒶𝓁𝒾𝓏𝑒𝒹 𝓈𝓊𝒸𝒸𝑒𝓈𝓈𝒻𝓊𝓁𝓁𝓎!")
+            print("✅ 𝒜𝓁𝓁 𝐹𝑂𝑅𝐸𝐼𝐺𝑁 𝒦𝐸 𝒀 𝒸𝑜𝓃𝓈𝓉𝓇𝒶𝒾𝓃𝓉𝓈 𝒶𝓇𝑒 𝑒𝓃𝒶𝒷𝓁𝑒𝒹!")
+            print("=" * 50)
+
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
+            # If polling exits normally, break the retry loop
+            break
+
+        except InvalidToken as e:
+            logging.error(f"Invalid token: {e}. Retrying in {retry_delay}s.")
+            print(f"Invalid token. Retrying in {retry_delay}s.")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 600)
+            continue
+
+        except Exception as e:
+            logging.error(f"Failed to start bot: {e}")
+            print("❌ Bot failed to start. Retrying...")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 600)
+            continue
             # Games table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS games (
@@ -359,7 +364,7 @@ class DatabaseManager:
                 cursor.execute('''
                 INSERT OR IGNORE INTO items (name, price, emoji, description, added_by)
                 VALUES (?, ?, ?, ?, ?)
-                ''', (item['name'], item['price'], item['emoji'], item['description'], BOT_OWNER_ID))
+                ''', (item['name'], item['price'], item['emoji'], item['description'], None))
             
             conn.commit()
     
@@ -3245,6 +3250,25 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors in the bot."""
     logging.error(f"Update {update} caused error {context.error}")
 
+
+# ========== STOP COMMAND ==========
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only command to stop the bot gracefully."""
+    user = update.effective_user
+    if not user:
+        return
+    if user.id != BOT_OWNER_ID:
+        try:
+            await update.message.reply_text("❌ You are not authorized to stop this bot.")
+        except:
+            pass
+        return
+    try:
+        await update.message.reply_text("🛑 Stopping bot as requested by owner...")
+    except:
+        pass
+    await context.application.stop()
+
 # ========== CALLBACK HANDLER ==========
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all callback queries"""
@@ -3583,8 +3607,8 @@ async def scheduled_tasks():
 def main():
     """Start the bot"""
     try:
-        # Create application
-        application = Application.builder().token(TOKEN).build()
+        # Create application - strip token to remove any whitespace
+        application = Application.builder().token(TOKEN.strip()).build()
         
         # Add error handler
         application.add_error_handler(error_handler)
@@ -3668,11 +3692,15 @@ def main():
         #     chat_handler
         # ), group=2)
         
-        # Start scheduler for periodic tasks
-        # NOTE: Scheduler requires async context, commenting out for now
-        # scheduler = AsyncIOScheduler()
-        # scheduler.add_job(scheduled_tasks, 'interval', minutes=5)
-        # scheduler.start()
+        # Start scheduler for periodic tasks (if async event loop is available)
+        # Note: Scheduler will be managed by the application
+        try:
+            scheduler = AsyncIOScheduler()
+            scheduler.add_job(scheduled_tasks, 'interval', minutes=5)
+            # Don't start here, let telegram.ext handle it
+            # scheduler.start()
+        except Exception as e:
+            logging.warning(f"Could not set up scheduler: {e}")
         
         # Start bot
         print("=" * 50)
