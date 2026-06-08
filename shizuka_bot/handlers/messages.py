@@ -1,11 +1,11 @@
 """Message handlers for non-command messages"""
 import logging
 import random
-import os  # <-- Environment variables read karne ke liye
+import os
+import httpx  # <-- Direct API request bhejne ke liye
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-import google.generativeai as genai
 
 from shizuka_bot.config import settings
 from shizuka_bot.database import DatabaseManager
@@ -27,30 +27,40 @@ async def safe_reply(update, text, parse_mode=None, **kwargs):
         else:
             await update.effective_message.reply_text(text, **kwargs)
 
-# Initialize Gemini if API key available
-gemini_model = None
-try:
+async def get_gemini_response(message_text: str) -> str:
+    """Direct API call to bypass outdated python library issues"""
     api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
-    
-    if api_key:
-        genai.configure(api_key=api_key)
-        
-        # Yahan humne full path name use kiya hai jo purani libraries me bhi 100% kaam karta hai
-        # Default me 'models/gemini-1.5-flash' chalega, fallback me 'gemini-1.0-pro'
-        chosen_model = os.getenv("GEMINI_MODEL", "models/gemini-1.5-flash")
-        
-        try:
-            gemini_model = genai.GenerativeModel(chosen_model)
-        except Exception:
-            # Agar library bohot hi zyada out-dated hui to ye stable model pakka chalega
-            gemini_model = genai.GenerativeModel('gemini-1.0-pro')
-            chosen_model = 'gemini-1.0-pro'
-            
-        logger.info(f"✅ Gemini AI initialized successfully with model: {chosen_model}")
-    else:
+    if not api_key:
         logger.warning("⚠️ GEMINI_API_KEY nahi mili!")
-except Exception as e:
-    logger.warning(f"⚠️ Gemini initialization failed: {e}")
+        return "🔴 AI key is missing in configuration."
+
+    chosen_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{chosen_model}:generateContent?key={api_key}"
+    
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{
+            "parts": [{"text": message_text}]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": 200,
+            "temperature": 0.7
+        }
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json=payload, headers=headers, timeout=15.0)
+            if response.status_code == 200:
+                data = response.json()
+                # Parse the response text safely
+                return data['candidates'][0]['content']['parts'][0]['text']
+            else:
+                logger.error(f"Gemini API Http Error {response.status_code}: {response.text}")
+                return "😅 I'm having trouble connecting to my brain right now."
+        except Exception as e:
+            logger.error(f"Error during direct Gemini API hit: {e}")
+            return "😅 Something went wrong while thinking."
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular messages with AI response"""
@@ -70,13 +80,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Check if message mentions bot or is a reply to bot
         if update.effective_chat.type == "private":
-            # Private chat - always respond
             await handle_ai_message(update, message_text)
         elif "@" in message_text and settings.BOT_SETTINGS['bot_name'] in message_text:
-            # Mentioned in group
             await handle_ai_message(update, message_text)
         elif update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot:
-            # Reply to bot message
             await handle_ai_message(update, message_text)
     
     except Exception as e:
@@ -88,33 +95,23 @@ async def handle_ai_message(update: Update, message_text: str):
         # Show typing indicator
         await update.effective_chat.send_action("typing")
         
-        if not gemini_model:
-            await update.message.reply_text(
-                "🔴 AI service temporarily unavailable. Try again later!",
-                quote=True
-            )
-            return
-        
-        # Clean message
+        # Clean message from bot mentions
         message_text = message_text.replace(settings.BOT_SETTINGS['bot_name'], '').strip()
         if message_text.startswith('@'):
             message_text = ' '.join(message_text.split()[1:])
         
-        # Get AI response
-        response = gemini_model.generate_content(
-            message_text,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=200,
-                temperature=0.7,
-            )
-        )
+        # Direct HTTP bypass request call
+        reply_text = await get_gemini_response(message_text)
         
-        reply_text = response.text[:500] if response.text else "I couldn't generate a response."
+        if reply_text:
+            reply_text = reply_text[:500]
+        else:
+            reply_text = "I couldn't generate a response."
         
         await safe_reply(update, f"🤖 {reply_text}", parse_mode=ParseMode.HTML, quote=True)
     
     except Exception as e:
-        logger.error(f"AI response error: {e}")
+        logger.error(f"AI response handler error: {e}")
         await update.message.reply_text(
             "😅 I had trouble understanding that. Try rephrasing!",
             quote=True
