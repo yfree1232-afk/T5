@@ -28,26 +28,23 @@ async def safe_reply(update, text, parse_mode=None, **kwargs):
             await update.effective_message.reply_text(text, **kwargs)
 
 async def get_gemini_response(message_text: str) -> str:
-    """Direct API call to bypass outdated python library issues"""
+    """Direct API call with standard endpoint format"""
     api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
     if not api_key:
         logger.warning("⚠️ GEMINI_API_KEY nahi mili!")
         return "🔴 AI key is missing in configuration."
 
+    # Model name format setup
     chosen_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
     
-    # FIX: v1beta ko badal kar v1 kiya hai jo naye models ko support karta hai
-    url = f"https://generativelanguage.googleapis.com/v1/models/{chosen_model}:generateContent?key={api_key}"
+    # Standard URL endpoint format for Gemini 1.5 models
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{chosen_model}:generateContent?key={api_key}"
     
     headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [{
             "parts": [{"text": message_text}]
-        }],
-        "generationConfig": {
-            "maxOutputTokens": 200,
-            "temperature": 0.7
-        }
+        }]
     }
 
     async with httpx.AsyncClient() as client:
@@ -116,4 +113,5 @@ async def handle_ai_message(update: Update, message_text: str):
         await update.message.reply_text(
             "😅 I had trouble understanding that. Try rephrasing!",
             quote=True
-    )
+        )
+        
