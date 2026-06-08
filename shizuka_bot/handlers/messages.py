@@ -1,6 +1,7 @@
 """Message handlers for non-command messages"""
 import logging
 import random
+import os  # <-- Smart switching ke liye add kiya
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -31,8 +32,14 @@ gemini_model = None
 try:
     if settings.GEMINI_API_KEY:
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('gemini-pro')
-        logger.info("✅ Gemini AI initialized")
+        
+        # Smart Model Selection: 
+        # Agar Heroku me GEMINI_MODEL naam ka variable hoga to wo chalega, 
+        # nahi to default me free wala 'gemini-1.5-flash' chalega.
+        chosen_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        gemini_model = genai.GenerativeModel(chosen_model)
+        
+        logger.info(f"✅ Gemini AI initialized with model: {chosen_model}")
 except Exception as e:
     logger.warning(f"⚠️ Gemini initialization failed: {e}")
 
@@ -103,3 +110,4 @@ async def handle_ai_message(update: Update, message_text: str):
             "😅 I had trouble understanding that. Try rephrasing!",
             quote=True
         )
+        
