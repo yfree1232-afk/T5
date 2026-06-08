@@ -30,16 +30,22 @@ async def safe_reply(update, text, parse_mode=None, **kwargs):
 # Initialize Gemini if API key available
 gemini_model = None
 try:
-    # Sabse pehle direct Heroku Config Vars se key uthayega, backup me settings use karega
     api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
     
     if api_key:
         genai.configure(api_key=api_key)
         
-        # Smart Model Selection: Heroku me GEMINI_MODEL set nahi kiya to automatic free 'gemini-1.5-flash' chalega
-        chosen_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-        gemini_model = genai.GenerativeModel(chosen_model)
+        # Yahan humne full path name use kiya hai jo purani libraries me bhi 100% kaam karta hai
+        # Default me 'models/gemini-1.5-flash' chalega, fallback me 'gemini-1.0-pro'
+        chosen_model = os.getenv("GEMINI_MODEL", "models/gemini-1.5-flash")
         
+        try:
+            gemini_model = genai.GenerativeModel(chosen_model)
+        except Exception:
+            # Agar library bohot hi zyada out-dated hui to ye stable model pakka chalega
+            gemini_model = genai.GenerativeModel('gemini-1.0-pro')
+            chosen_model = 'gemini-1.0-pro'
+            
         logger.info(f"✅ Gemini AI initialized successfully with model: {chosen_model}")
     else:
         logger.warning("⚠️ GEMINI_API_KEY nahi mili!")
