@@ -13,6 +13,14 @@ from shizuka_bot.database import DatabaseManager
 logger = logging.getLogger(__name__)
 db = DatabaseManager()
 
+# BOT PERSONALITY SETTING (Yahan se aap uski baatein funny ya friendly bana sakte ho)
+SYSTEM_PROMPT = (
+    "You are a friendly, witty, and slightly sarcastic AI chat companion named Luccy. "
+    "Respond in a natural, casual mix of Hindi and English (Hinglish), just like a real friend chats on WhatsApp. "
+    "Never sound like a rigid textbook AI. Use modern internet slang, emojis sometimes, and keep your answers short, funny, and engaging. "
+    "If someone asks if you ate food, make a joke about eating data or battery. Stay entertaining!"
+)
+
 async def safe_reply(update, text, parse_mode=None, **kwargs):
     """Send reply safely; fallback to plain text on parse errors"""
     try:
@@ -28,21 +36,30 @@ async def safe_reply(update, text, parse_mode=None, **kwargs):
             await update.effective_message.reply_text(text, **kwargs)
 
 async def get_gemini_response(message_text: str) -> str:
-    """Direct API call with automatic multi-model fallback loop to avoid 404s"""
+    """Direct API call with System Prompt injection for a cool personality"""
     api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
     if not api_key:
         logger.warning("⚠️ GEMINI_API_KEY nahi mili!")
         return "🔴 AI key is missing in configuration."
 
-    # User ka custom model ya fir sequence wise valid model list try karega
     custom_model = os.getenv("GEMINI_MODEL")
+    # gemini-2.5-flash standard system instruction support karta hai
     models_to_try = [custom_model] if custom_model else ["gemini-2.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro"]
 
     headers = {"Content-Type": "application/json"}
+    
+    # Payload format updated to officially include system instructions where supported
     payload = {
         "contents": [{
             "parts": [{"text": message_text}]
-        }]
+        }],
+        "systemInstruction": {
+            "parts": [{"text": SYSTEM_PROMPT}]
+        },
+        "generationConfig": {
+            "temperature": 0.85,  # Temperature badha diya taaki response zyada funny aur creative ho
+            "maxOutputTokens": 250
+        }
     }
 
     async with httpx.AsyncClient() as client:
@@ -54,11 +71,11 @@ async def get_gemini_response(message_text: str) -> str:
                     data = response.json()
                     return data['candidates'][0]['content']['parts'][0]['text']
                 else:
-                    logger.warning(f"Model {model} failed with {response.status_code}. Trying next fallback...")
+                    logger.warning(f"Model {model} failed with {response.status_code}.")
             except Exception as e:
                 logger.error(f"Error trying model {model}: {e}")
                 
-        return "😅 I'm having trouble connecting to my brain right now. All API models rejected the request."
+        return "😅 Yaar dimaag thoda garam ho gaya hai, ek baar fir se bolna?"
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular messages with AI response"""
@@ -95,17 +112,13 @@ async def handle_ai_message(update: Update, message_text: str):
         
         reply_text = await get_gemini_response(message_text)
         
-        if reply_text:
-            reply_text = reply_text[:500]
-        else:
-            reply_text = "I couldn't generate a response."
-        
-        await safe_reply(update, f"🤖 {reply_text}", parse_mode=ParseMode.HTML, quote=True)
+        # Format pure text responses gently
+        await safe_reply(update, reply_text, quote=True)
     
     except Exception as e:
         logger.error(f"AI response handler error: {e}")
         await update.message.reply_text(
-            "😅 I had trouble understanding that. Try rephrasing!",
+            "😅 Kuch locha lag raha hai, phir se bolna!",
             quote=True
         )
         
