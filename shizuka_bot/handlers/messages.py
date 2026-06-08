@@ -1,7 +1,7 @@
 """Message handlers for non-command messages"""
 import logging
 import random
-import os  # <-- Smart switching ke liye add kiya
+import os  # <-- Environment variables read karne ke liye
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -30,16 +30,19 @@ async def safe_reply(update, text, parse_mode=None, **kwargs):
 # Initialize Gemini if API key available
 gemini_model = None
 try:
-    if settings.GEMINI_API_KEY:
-        genai.configure(api_key=settings.GEMINI_API_KEY)
+    # Sabse pehle direct Heroku Config Vars se key uthayega, backup me settings use karega
+    api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
+    
+    if api_key:
+        genai.configure(api_key=api_key)
         
-        # Smart Model Selection: 
-        # Agar Heroku me GEMINI_MODEL naam ka variable hoga to wo chalega, 
-        # nahi to default me free wala 'gemini-1.5-flash' chalega.
+        # Smart Model Selection: Heroku me GEMINI_MODEL set nahi kiya to automatic free 'gemini-1.5-flash' chalega
         chosen_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
         gemini_model = genai.GenerativeModel(chosen_model)
         
-        logger.info(f"✅ Gemini AI initialized with model: {chosen_model}")
+        logger.info(f"✅ Gemini AI initialized successfully with model: {chosen_model}")
+    else:
+        logger.warning("⚠️ GEMINI_API_KEY nahi mili!")
 except Exception as e:
     logger.warning(f"⚠️ Gemini initialization failed: {e}")
 
