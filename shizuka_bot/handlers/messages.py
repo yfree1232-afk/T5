@@ -116,5 +116,4 @@ async def handle_ai_message(update: Update, message_text: str):
         await update.message.reply_text(
             "😅 I had trouble understanding that. Try rephrasing!",
             quote=True
-                )
-                            
+    )
