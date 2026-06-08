@@ -6,6 +6,9 @@ import asyncio
 import logging
 import io
 import csv
+import nest_asyncio
+import asyncio
+nest_asyncio.apply()
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
