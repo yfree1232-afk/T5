@@ -2,7 +2,7 @@
 import logging
 import random
 import os
-import httpx  # <-- Direct API request bhejne ke liye
+import httpx
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -28,18 +28,16 @@ async def safe_reply(update, text, parse_mode=None, **kwargs):
             await update.effective_message.reply_text(text, **kwargs)
 
 async def get_gemini_response(message_text: str) -> str:
-    """Direct API call with standard endpoint format"""
+    """Direct API call with automatic multi-model fallback loop to avoid 404s"""
     api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
     if not api_key:
         logger.warning("⚠️ GEMINI_API_KEY nahi mili!")
         return "🔴 AI key is missing in configuration."
 
-    # Model name format setup
-    chosen_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-    
-    # Standard URL endpoint format for Gemini 1.5 models
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{chosen_model}:generateContent?key={api_key}"
-    
+    # User ka custom model ya fir sequence wise valid model list try karega
+    custom_model = os.getenv("GEMINI_MODEL")
+    models_to_try = [custom_model] if custom_model else ["gemini-2.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro"]
+
     headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [{
@@ -48,17 +46,19 @@ async def get_gemini_response(message_text: str) -> str:
     }
 
     async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(url, json=payload, headers=headers, timeout=15.0)
-            if response.status_code == 200:
-                data = response.json()
-                return data['candidates'][0]['content']['parts'][0]['text']
-            else:
-                logger.error(f"Gemini API Http Error {response.status_code}: {response.text}")
-                return "😅 I'm having trouble connecting to my brain right now."
-        except Exception as e:
-            logger.error(f"Error during direct Gemini API hit: {e}")
-            return "😅 Something went wrong while thinking."
+        for model in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            try:
+                response = await client.post(url, json=payload, headers=headers, timeout=15.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    return data['candidates'][0]['content']['parts'][0]['text']
+                else:
+                    logger.warning(f"Model {model} failed with {response.status_code}. Trying next fallback...")
+            except Exception as e:
+                logger.error(f"Error trying model {model}: {e}")
+                
+        return "😅 I'm having trouble connecting to my brain right now. All API models rejected the request."
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular messages with AI response"""
@@ -66,17 +66,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text:
             return
         
-        # Skip commands
         if update.message.text.startswith('/'):
             return
         
         user = update.effective_user
         message_text = update.message.text
         
-        # Ensure user exists in database
         db.get_or_create_user(user.id, user.username, user.first_name, user.last_name)
         
-        # Check if message mentions bot or is a reply to bot
         if update.effective_chat.type == "private":
             await handle_ai_message(update, message_text)
         elif "@" in message_text and settings.BOT_SETTINGS['bot_name'] in message_text:
@@ -90,15 +87,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_ai_message(update: Update, message_text: str):
     """Handle message with AI response"""
     try:
-        # Show typing indicator
         await update.effective_chat.send_action("typing")
         
-        # Clean message from bot mentions
         message_text = message_text.replace(settings.BOT_SETTINGS['bot_name'], '').strip()
         if message_text.startswith('@'):
             message_text = ' '.join(message_text.split()[1:])
         
-        # Direct HTTP bypass request call
         reply_text = await get_gemini_response(message_text)
         
         if reply_text:
