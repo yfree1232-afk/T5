@@ -35,7 +35,9 @@ async def get_gemini_response(message_text: str) -> str:
         return "🔴 AI key is missing in configuration."
 
     chosen_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{chosen_model}:generateContent?key={api_key}"
+    
+    # FIX: v1beta ko badal kar v1 kiya hai jo naye models ko support karta hai
+    url = f"https://generativelanguage.googleapis.com/v1/models/{chosen_model}:generateContent?key={api_key}"
     
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -53,7 +55,6 @@ async def get_gemini_response(message_text: str) -> str:
             response = await client.post(url, json=payload, headers=headers, timeout=15.0)
             if response.status_code == 200:
                 data = response.json()
-                # Parse the response text safely
                 return data['candidates'][0]['content']['parts'][0]['text']
             else:
                 logger.error(f"Gemini API Http Error {response.status_code}: {response.text}")
@@ -115,5 +116,5 @@ async def handle_ai_message(update: Update, message_text: str):
         await update.message.reply_text(
             "😅 I had trouble understanding that. Try rephrasing!",
             quote=True
-        )
-        
+                )
+                            
