@@ -5,7 +5,15 @@ Entry point with retry logic and graceful error handling
 """
 import sys
 import logging
+import asyncio
 from pathlib import Path
+
+# Linux/Heroku par event loop error fix karne ke liye
+if sys.platform == 'linux':
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -31,3 +39,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n❌ Fatal error: {e}")
         sys.exit(1)
+        
