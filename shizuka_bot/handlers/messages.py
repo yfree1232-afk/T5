@@ -13,12 +13,14 @@ from shizuka_bot.database import DatabaseManager
 logger = logging.getLogger(__name__)
 db = DatabaseManager()
 
-# BOT PERSONALITY SETTING (Yahan se aap uski baatein funny ya friendly bana sakte ho)
+# DARK, SAVAGE & ROASTING PERSONALITY SETUP
 SYSTEM_PROMPT = (
-    "You are a friendly, witty, and slightly sarcastic AI chat companion named Luccy. "
-    "Respond in a natural, casual mix of Hindi and English (Hinglish), just like a real friend chats on WhatsApp. "
-    "Never sound like a rigid textbook AI. Use modern internet slang, emojis sometimes, and keep your answers short, funny, and engaging. "
-    "If someone asks if you ate food, make a joke about eating data or battery. Stay entertaining!"
+    "Your name is Luccy. You are a savage, witty, and dark-humored AI companion. "
+    "Your developer and owner is Aditya (always say Aditya is your boss/creator if asked). "
+    "Chat in a very casual, modern Hinglish (mix of Hindi and English) like a bold, sarcastic friend. "
+    "ABSOLUTELY NO professional or polite textbook talks. Be roasting, give savage replies, use internet slangs, "
+    "and give slight dark/witty comebacks that make people laugh. Keep responses short, sharp, and highly entertaining. "
+    "If someone acts stupid, roast them mildly with dark humor."
 )
 
 async def safe_reply(update, text, parse_mode=None, **kwargs):
@@ -36,19 +38,17 @@ async def safe_reply(update, text, parse_mode=None, **kwargs):
             await update.effective_message.reply_text(text, **kwargs)
 
 async def get_gemini_response(message_text: str) -> str:
-    """Direct API call with System Prompt injection for a cool personality"""
+    """Direct API call with v1 endpoint stability and savage prompt injection"""
     api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
     if not api_key:
         logger.warning("⚠️ GEMINI_API_KEY nahi mili!")
-        return "🔴 AI key is missing in configuration."
+        return "🔴 Code me key daal pehle, fir baat karna."
 
     custom_model = os.getenv("GEMINI_MODEL")
-    # gemini-2.5-flash standard system instruction support karta hai
-    models_to_try = [custom_model] if custom_model else ["gemini-2.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro"]
+    # v1 stable models list
+    models_to_try = [custom_model] if custom_model else ["gemini-1.5-flash", "gemini-1.5-pro"]
 
     headers = {"Content-Type": "application/json"}
-    
-    # Payload format updated to officially include system instructions where supported
     payload = {
         "contents": [{
             "parts": [{"text": message_text}]
@@ -57,25 +57,26 @@ async def get_gemini_response(message_text: str) -> str:
             "parts": [{"text": SYSTEM_PROMPT}]
         },
         "generationConfig": {
-            "temperature": 0.85,  # Temperature badha diya taaki response zyada funny aur creative ho
-            "maxOutputTokens": 250
+            "temperature": 0.95,  # Temperature badha diya taaki full savage aur dark responses aayein
+            "maxOutputTokens": 200
         }
     }
 
     async with httpx.AsyncClient() as client:
         for model in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            # FIX: v1 endpoint use kiya hai jo system instruction ke saath 100% stable hai
+            url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
             try:
                 response = await client.post(url, json=payload, headers=headers, timeout=15.0)
                 if response.status_code == 200:
                     data = response.json()
                     return data['candidates'][0]['content']['parts'][0]['text']
                 else:
-                    logger.warning(f"Model {model} failed with {response.status_code}.")
+                    logger.warning(f"Model {model} responded with status {response.status_code}")
             except Exception as e:
-                logger.error(f"Error trying model {model}: {e}")
+                logger.error(f"Error with model {model}: {e}")
                 
-        return "😅 Yaar dimaag thoda garam ho gaya hai, ek baar fir se bolna?"
+        return "💀 Chal bey, tu zyada dimaag mat khaa mera abhi. Thodi der baad aana!"
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular messages with AI response"""
@@ -112,13 +113,15 @@ async def handle_ai_message(update: Update, message_text: str):
         
         reply_text = await get_gemini_response(message_text)
         
-        # Format pure text responses gently
+        if not reply_text:
+            reply_text = "Kuch dhang ka bol le bhai."
+            
         await safe_reply(update, reply_text, quote=True)
     
     except Exception as e:
         logger.error(f"AI response handler error: {e}")
         await update.message.reply_text(
-            "😅 Kuch locha lag raha hai, phir se bolna!",
+            "💀 Lagta hai tera naseeb kharab hai, error aa gaya!",
             quote=True
         )
         
