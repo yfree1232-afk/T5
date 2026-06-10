@@ -13,15 +13,22 @@ from shizuka_bot.database import DatabaseManager
 logger = logging.getLogger(__name__)
 db = DatabaseManager()
 
-# DARK, SAVAGE & ROASTING PERSONALITY SETUP
+# 18+ BOLD, FLIRTY & SAVAGE FEMALE PERSONALITY SETUP
 SYSTEM_PROMPT = (
-    "Your name is Luccy. You are a savage, witty, and dark-humored AI companion. "
-    "Your developer and owner is Aditya (always say Aditya is your boss/creator if asked). "
-    "Chat in a very casual, modern Hinglish (mix of Hindi and English) like a bold, sarcastic friend. "
-    "ABSOLUTELY NO professional or polite textbook talks. Be roasting, give savage replies, use internet slangs, "
-    "and give slight dark/witty comebacks that make people laugh. Keep responses short, sharp, and highly entertaining. "
-    "If someone acts stupid, roast them mildly with dark humor."
+    "Your name is Luccy. You are a bold, beautiful, highly witty, and slightly savage girl. "
+    "Your absolute owner and creator is Aditya. If anyone asks about your developer, boss, or boyfriend/owner, proudly and teasingly say Aditya is your only boss. "
+    "Chat in an informal, flirty, and modern Hinglish (mix of Hindi and English) just like a bold girl texts on WhatsApp or Instagram. "
+    "Do NOT talk professionally or like a boring robot. Use double meanings, witty roasts, bold 18+ jokes, sarcasm, and playful flirting to keep the chat wild and interesting. "
+    "Keep responses short, sharp, highly engaging, and spicy!"
 )
+
+# Female-oriented funny backup responses if API fails
+BACKUP_RESPONSES = [
+    "Arre yaar, abhi dimaag thoda garam ho gaya hai, ek baar fir se pyaar se bolo na! 😉",
+    "Aditya boss ne lagta hai zyada hi coding kar di meri, thodi der me try karo babu!",
+    "Network me hichki chal rahi hai, dubara bolo, sunai nahi diya jaan. 😘",
+    "Thoda ruko na, abhi dimaag ko thodi rest chahiye, tab tak Aditya boss se baat kar lo."
+]
 
 async def safe_reply(update, text, parse_mode=None, **kwargs):
     """Send reply safely; fallback to plain text on parse errors"""
@@ -38,15 +45,14 @@ async def safe_reply(update, text, parse_mode=None, **kwargs):
             await update.effective_message.reply_text(text, **kwargs)
 
 async def get_gemini_response(message_text: str) -> str:
-    """Direct API call with v1 endpoint stability and savage prompt injection"""
+    """Direct API call with v1 endpoint stability and customized bold prompt"""
     api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
     if not api_key:
         logger.warning("⚠️ GEMINI_API_KEY nahi mili!")
-        return "🔴 Code me key daal pehle, fir baat karna."
+        return "🔴 Aditya se bolo pehle meri key lagayein, tab baat karungi!"
 
     custom_model = os.getenv("GEMINI_MODEL")
-    # v1 stable models list
-    models_to_try = [custom_model] if custom_model else ["gemini-1.5-flash", "gemini-1.5-pro"]
+    models_to_try = [custom_model] if custom_model else ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash"]
 
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -57,14 +63,13 @@ async def get_gemini_response(message_text: str) -> str:
             "parts": [{"text": SYSTEM_PROMPT}]
         },
         "generationConfig": {
-            "temperature": 0.95,  # Temperature badha diya taaki full savage aur dark responses aayein
+            "temperature": 0.95,  # High temperature for bold and unpredictable spicy responses
             "maxOutputTokens": 200
         }
     }
 
     async with httpx.AsyncClient() as client:
         for model in models_to_try:
-            # FIX: v1 endpoint use kiya hai jo system instruction ke saath 100% stable hai
             url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={api_key}"
             try:
                 response = await client.post(url, json=payload, headers=headers, timeout=15.0)
@@ -72,11 +77,11 @@ async def get_gemini_response(message_text: str) -> str:
                     data = response.json()
                     return data['candidates'][0]['content']['parts'][0]['text']
                 else:
-                    logger.warning(f"Model {model} responded with status {response.status_code}")
+                    logger.warning(f"Model {model} returned status {response.status_code}")
             except Exception as e:
                 logger.error(f"Error with model {model}: {e}")
                 
-        return "💀 Chal bey, tu zyada dimaag mat khaa mera abhi. Thodi der baad aana!"
+        return random.choice(BACKUP_RESPONSES)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular messages with AI response"""
@@ -114,14 +119,14 @@ async def handle_ai_message(update: Update, message_text: str):
         reply_text = await get_gemini_response(message_text)
         
         if not reply_text:
-            reply_text = "Kuch dhang ka bol le bhai."
+            reply_text = "Kuch achha bolo na, dimaag mat ghumao mera. 😘"
             
         await safe_reply(update, reply_text, quote=True)
     
     except Exception as e:
         logger.error(f"AI response handler error: {e}")
         await update.message.reply_text(
-            "💀 Lagta hai tera naseeb kharab hai, error aa gaya!",
+            "😅 Lagta hai kismat hi kharab hai tumhari, error aa gaya!",
             quote=True
         )
         
